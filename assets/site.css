@@ -272,11 +272,63 @@ main {
     gap: 34px;
 }
 
+.experience-main,
+.resume-section,
+.project-list {
+    display: grid;
+    gap: 18px;
+}
+
+.experience-main {
+    gap: 52px;
+}
+
+.compact-title {
+    margin-bottom: 10px;
+}
+
+.education-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.education-card {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 16px;
+    align-items: center;
+    min-height: 132px;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+
+.education-card img {
+    width: 72px;
+    height: 72px;
+    object-fit: contain;
+}
+
+.education-card h3,
+.project-row h3 {
+    margin: 0 0 8px;
+    font-size: 1.2rem;
+    line-height: 1.24;
+}
+
+.education-card p {
+    margin: 0;
+    color: var(--muted);
+}
+
 .about-panel,
 .profile-panel,
 .card,
 .timeline-item,
-.side-card {
+.side-card,
+.project-row {
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--surface);
@@ -517,6 +569,27 @@ main {
     padding: 24px;
 }
 
+.project-row {
+    display: grid;
+    grid-template-columns: 132px minmax(0, 1fr);
+    gap: 22px;
+    padding: 24px;
+}
+
+.project-row p {
+    margin: 0;
+    color: var(--muted);
+}
+
+.project-meta {
+    display: grid;
+    align-content: start;
+    justify-items: start;
+    gap: 10px;
+    color: var(--muted);
+    font-weight: 800;
+}
+
 .timeline-date {
     line-height: 1.25;
 }
@@ -573,6 +646,25 @@ main {
 .side-list small {
     color: var(--muted);
     font-weight: 700;
+}
+
+.mini-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.mini-tags span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    color: var(--brand-dark);
+    background: #e6f2ef;
+    font-size: 0.82rem;
+    font-weight: 800;
 }
 
 .site-footer {
@@ -634,7 +726,8 @@ main {
 
     .section-heading,
     .about-grid,
-    .experience-layout {
+    .experience-layout,
+    .education-grid {
         grid-template-columns: 1fr;
     }
 
@@ -739,5 +832,28 @@ main {
     .timeline-item {
         grid-template-columns: 1fr;
         gap: 12px;
+    }
+
+    .education-card {
+        grid-template-columns: 58px minmax(0, 1fr);
+        min-height: auto;
+        padding: 18px;
+    }
+
+    .education-card img {
+        width: 58px;
+        height: 58px;
+    }
+
+    .project-row {
+        grid-template-columns: 1fr;
+        gap: 14px;
+        padding: 20px;
+    }
+
+    .project-meta {
+        grid-template-columns: auto auto;
+        align-items: center;
+        justify-content: start;
     }
 }
