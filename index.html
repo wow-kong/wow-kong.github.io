@@ -2,10 +2,188 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>我的个人博客</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Sun Zhifei 的个人主页，记录技术实践、项目作品与思考文章。">
+    <title>Sun Zhifei | 个人主页</title>
+    <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-    <h1>Hello World! 这是我的个人博客。</h1>
-    <p>正在建设中...</p>
+    <header class="site-header">
+        <nav class="nav" aria-label="主导航">
+            <a class="brand" href="#top" aria-label="返回首页">
+                <span class="brand-mark">SZ</span>
+                <span>Sun Zhifei</span>
+            </a>
+            <div class="nav-links">
+                <a href="#about">关于</a>
+                <a href="experience.html">经历</a>
+                <a href="#projects">项目</a>
+                <a href="#writing">文章</a>
+                <a href="#profile">联系</a>
+            </div>
+        </nav>
+    </header>
+
+    <main id="top">
+        <section class="hero" aria-label="个人主页首屏">
+            <div class="hero-inner">
+                <p class="eyebrow">Personal Website · sunzhifei.com</p>
+                <h1><span>把想法写清楚，</span><span>把产品做扎实。</span></h1>
+                <p class="hero-copy">这里会整理我的技术实践、项目作品、读书笔记和长期思考。关注工程、产品、写作，以及把复杂问题拆成可以落地的路径。</p>
+                <div class="hero-actions" aria-label="快捷入口">
+                    <a class="button button-primary" href="#projects">查看项目</a>
+                    <a class="button button-secondary" href="experience.html">个人经历</a>
+                </div>
+            </div>
+        </section>
+
+        <section class="section" id="about">
+            <div class="container">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">About</p>
+                        <h2 class="section-title">一个可持续更新的个人知识与作品入口。</h2>
+                    </div>
+                    <p class="section-summary">以清晰的信息结构承载履历、项目案例、文章和公开联系入口。</p>
+                </div>
+
+                <div class="about-grid">
+                    <article class="about-panel">
+                        <p>我喜欢把技术问题放回真实场景里理解：需求、边界、取舍、实现细节，以及上线之后怎样继续演进。</p>
+                        <p>这个主页会作为公开索引，集中呈现我正在做的事情、沉淀下来的方法，以及值得复盘的项目经验。</p>
+                        <div class="skill-list" aria-label="关注方向">
+                            <span>Software Engineering</span>
+                            <span>Product Thinking</span>
+                            <span>AI Tools</span>
+                            <span>Writing</span>
+                        </div>
+                    </article>
+
+                    <aside class="profile-panel sidebar-panel" id="profile" aria-label="个人侧边栏">
+                        <div class="profile-visual" role="img" aria-label="书桌、笔记本和电脑组成的工作场景"></div>
+                        <div class="sidebar-content">
+                            <div class="sidebar-intro">
+                                <p class="sidebar-label">Profile</p>
+                                <h3>Sun Zhifei</h3>
+                                <p>关注软件工程、AI 工具、产品构建与写作沉淀，持续记录项目实践和方法复盘。</p>
+                            </div>
+
+                            <div class="facts">
+                                <div class="fact">
+                                    <span>站点</span>
+                                    <strong>sunzhifei.com</strong>
+                                </div>
+                                <div class="fact">
+                                    <span>方向</span>
+                                    <strong>Engineering · Product · AI</strong>
+                                </div>
+                                <div class="fact">
+                                    <span>状态</span>
+                                    <strong>记录与分享</strong>
+                                </div>
+                            </div>
+
+                            <div class="sidebar-links" aria-label="侧边栏联系方式">
+                                <p class="sidebar-label">Contact</p>
+                                <a class="sidebar-link" href="mailto:hello@sunzhifei.com">
+                                    <span>Email</span>
+                                    <strong>hello@sunzhifei.com</strong>
+                                </a>
+                                <a class="sidebar-link" href="https://github.com/wow-kong">
+                                    <span>GitHub</span>
+                                    <strong>@wow-kong</strong>
+                                </a>
+                            </div>
+
+                            <a class="sidebar-cta" href="experience.html">
+                                查看个人经历
+                                <span>↗</span>
+                            </a>
+                        </div>
+                    </aside>
+                </div>
+            </div>
+        </section>
+
+        <section class="section section-muted" id="projects">
+            <div class="container">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Projects</p>
+                        <h2 class="section-title">项目作品会在这里形成稳定索引。</h2>
+                    </div>
+                    <p class="section-summary">每个项目保留问题背景、关键决策、技术栈和结果指标，方便快速回看。</p>
+                </div>
+
+                <div class="card-grid">
+                    <article class="card">
+                        <div class="card-top">
+                            <span class="tag">Web</span>
+                            <span class="year">2026</span>
+                        </div>
+                        <h3>个人主页框架</h3>
+                        <p>一个轻量、响应式、可直接部署到 GitHub Pages 的个人网站基础结构。</p>
+                    </article>
+
+                    <article class="card">
+                        <div class="card-top">
+                            <span class="tag">AI</span>
+                            <span class="year">2026</span>
+                        </div>
+                        <h3>AI 工具实践</h3>
+                        <p>记录提示词、自动化工作流、评测方法，以及实际项目中的效率提升。</p>
+                    </article>
+
+                    <article class="card">
+                        <div class="card-top">
+                            <span class="tag">Notes</span>
+                            <span class="year">2026</span>
+                        </div>
+                        <h3>工程笔记合集</h3>
+                        <p>沉淀架构设计、调试经验、代码质量和团队协作中的可复用方法。</p>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section class="section" id="writing">
+            <div class="container">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">Writing</p>
+                        <h2 class="section-title">把零散经验整理成可复用的文字。</h2>
+                    </div>
+                    <p class="section-summary">围绕技术实践、产品思考和学习复盘，把零散经验沉淀成长期可回看的内容。</p>
+                </div>
+
+                <div class="post-list">
+                    <article class="post">
+                        <time datetime="2026-06-03">2026.06</time>
+                        <div>
+                            <h3>个人网站从骨架开始</h3>
+                            <p>先确定信息架构、视觉基调和可扩展模块，再逐步填入真实内容。</p>
+                        </div>
+                        <a class="post-link" href="experience.html" aria-label="了解个人网站从骨架开始">↗</a>
+                    </article>
+                    <article class="post">
+                        <time datetime="2026-06-03">2026.06</time>
+                        <div>
+                            <h3>项目复盘模板</h3>
+                            <p>围绕目标、约束、方案、风险和结果，把技术工作讲完整。</p>
+                        </div>
+                        <a class="post-link" href="experience.html" aria-label="了解项目复盘模板">↗</a>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026 Sun Zhifei. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
 </body>
 </html>
