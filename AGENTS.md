@@ -8,6 +8,7 @@ This repository hosts Sun Zhifei's personal GitHub Pages website. It currently i
 
 - Keep the personal website layout and UI simple, elegant, and restrained.
 - Prefer clear structure, calm spacing, readable typography, and consistent visual language over decorative complexity.
+- Except for personal experience pages and individual article pages, keep the homepage and public subpage header/hero treatment consistent in navigation structure, layout, imagery, spacing, and visual tone. When one changes, review the others and keep them in sync.
 
 ## Pre-Commit Review
 

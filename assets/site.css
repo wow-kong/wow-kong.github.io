@@ -131,6 +131,14 @@ main {
         url("article-hero-forest.jpg") center / cover no-repeat;
 }
 
+.article-list-hero {
+    min-height: clamp(440px, 58vh, 560px);
+    background:
+        linear-gradient(90deg, rgba(7, 16, 15, 0.84), rgba(7, 16, 15, 0.48) 42%, rgba(7, 16, 15, 0.08) 76%),
+        linear-gradient(0deg, rgba(7, 16, 15, 0.56), rgba(7, 16, 15, 0.02) 46%),
+        url("hero-bamboo.jpg") center / cover no-repeat;
+}
+
 .hero-inner {
     padding: 132px 0 64px;
 }
@@ -147,6 +155,11 @@ main {
 .article-hero .hero-inner {
     width: min(100% - 64px, 920px);
     padding: 104px 0 42px;
+}
+
+.article-list-hero .hero-inner {
+    width: min(100% - 64px, 960px);
+    padding: 96px 0 56px;
 }
 
 .eyebrow,
@@ -191,6 +204,12 @@ main {
     max-width: 880px;
     font-size: clamp(2rem, 4.6vw, 3.7rem);
     line-height: 1.06;
+}
+
+.article-list-hero h1 {
+    max-width: 780px;
+    font-size: clamp(2.35rem, 5.8vw, 4.8rem);
+    line-height: 0.98;
 }
 
 .hero h1 span {
@@ -379,16 +398,20 @@ main {
     font-weight: 700;
 }
 
-.article-list-header {
-    margin-bottom: 34px;
-}
-
-.article-list-header .section-title {
-    max-width: 760px;
-}
-
 .article-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: min(100%, 960px);
+    grid-template-columns: 1fr;
+    margin: 0 auto;
+}
+
+@media (min-width: 900px) {
+    .article-list .article-card {
+        grid-template-columns: minmax(260px, 0.34fr) minmax(0, 1fr);
+    }
+
+    .article-list .article-card-media {
+        min-height: 100%;
+    }
 }
 
 .pagination {
@@ -1121,6 +1144,10 @@ main {
         background-position: 58% center;
     }
 
+    .article-list-hero {
+        background-position: 58% center;
+    }
+
     .hero-inner {
         padding-top: 126px;
         padding-bottom: 42px;
@@ -1229,6 +1256,14 @@ main {
             url("article-hero-forest.jpg") 58% center / cover no-repeat;
     }
 
+    .article-list-hero {
+        min-height: 570px;
+        background:
+            linear-gradient(90deg, rgba(7, 16, 15, 0.84), rgba(7, 16, 15, 0.48)),
+            linear-gradient(0deg, rgba(7, 16, 15, 0.7), rgba(7, 16, 15, 0.08) 48%),
+            url("hero-bamboo.jpg") 62% center / cover no-repeat;
+    }
+
     .hero .hero-inner {
         width: min(100% - 32px, var(--content));
         padding-top: 134px;
@@ -1238,6 +1273,10 @@ main {
         width: min(100% - 32px, var(--content));
         padding-top: 134px;
         padding-bottom: 46px;
+    }
+
+    .article-list-hero .hero-inner {
+        padding-bottom: 48px;
     }
 
     .experience-hero {
