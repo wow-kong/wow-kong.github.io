@@ -101,7 +101,6 @@
             const pastedUrl = new URL(value, window.location.href);
             const accessParam = pastedUrl.searchParams.get("access");
             const directoryMatch = pastedUrl.pathname.match(/\/experience\/([A-Za-z0-9_-]+)\/?$/);
-            const pathMatch = pastedUrl.pathname.match(/experience-([A-Za-z0-9_-]+)\.html$/);
 
             if (accessParam) {
                 return accessParam;
@@ -110,18 +109,12 @@
             if (directoryMatch) {
                 return directoryMatch[1];
             }
-
-            if (pathMatch) {
-                return pathMatch[1];
-            }
         } catch (error) {
             // Treat non-URL input as a plain sharing code.
         }
 
         return value
             .replace(/^\/?experience\//, "")
-            .replace(/^experience-/, "")
-            .replace(/\.html$/, "")
             .replace(/\/$/, "");
     };
 

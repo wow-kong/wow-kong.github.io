@@ -70,13 +70,6 @@ img {
     justify-content: flex-end;
 }
 
-.brand {
-    display: inline-flex;
-    align-items: center;
-    font-weight: 700;
-    white-space: nowrap;
-}
-
 .nav-links {
     display: flex;
     align-items: center;
