@@ -125,7 +125,7 @@ main {
     background:
         linear-gradient(90deg, rgba(7, 16, 15, 0.78), rgba(7, 16, 15, 0.42) 42%, rgba(7, 16, 15, 0.08) 72%),
         linear-gradient(0deg, rgba(7, 16, 15, 0.66), rgba(7, 16, 15, 0.02) 44%),
-        url("hero-workspace.jpg") center / cover no-repeat;
+        url("hero-bamboo.jpg") center / cover no-repeat;
 }
 
 .hero-inner {
@@ -254,7 +254,7 @@ main {
     background:
         linear-gradient(90deg, rgba(7, 16, 15, 0.78), rgba(7, 16, 15, 0.36)),
         linear-gradient(0deg, rgba(7, 16, 15, 0.64), rgba(7, 16, 15, 0.08)),
-        url("hero-workspace.jpg") center / cover no-repeat;
+        url("hero-bamboo.jpg") center / cover no-repeat;
 }
 
 .gate-card {
@@ -861,7 +861,7 @@ main {
         background:
             linear-gradient(90deg, rgba(7, 16, 15, 0.82), rgba(7, 16, 15, 0.42)),
             linear-gradient(0deg, rgba(7, 16, 15, 0.72), rgba(7, 16, 15, 0.1) 48%),
-            url("hero-workspace.jpg") 62% center / cover no-repeat;
+            url("hero-bamboo.jpg") 62% center / cover no-repeat;
     }
 
     .hero .hero-inner {
