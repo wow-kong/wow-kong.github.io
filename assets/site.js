@@ -60,6 +60,143 @@
         });
     });
 
+    const getArticleDateTime = (article) => {
+        const timestamp = Date.parse(article.date || "");
+        return Number.isNaN(timestamp) ? 0 : timestamp;
+    };
+
+    const articleItems = (Array.isArray(window.SZF_ARTICLES) ? window.SZF_ARTICLES : [])
+        .slice()
+        .sort((current, next) => getArticleDateTime(next) - getArticleDateTime(current));
+
+    const resolveSitePath = (path) => {
+        if (!path || /^(https?:|mailto:|#|\/)/.test(path)) {
+            return path || "";
+        }
+
+        return `${document.body.dataset.siteRoot || ""}${path}`;
+    };
+
+    const createArticleCard = (article) => {
+        const card = document.createElement("a");
+        card.className = "article-card";
+        card.href = resolveSitePath(article.href);
+        card.setAttribute("aria-label", `阅读文章：${article.title}`);
+
+        const media = document.createElement("span");
+        media.className = "article-card-media";
+        media.setAttribute("role", "img");
+        media.setAttribute("aria-label", article.title);
+        media.style.backgroundImage = `url("${resolveSitePath(article.image)}")`;
+        card.appendChild(media);
+
+        const body = document.createElement("span");
+        body.className = "article-card-body";
+
+        const meta = document.createElement("span");
+        meta.className = "article-card-meta";
+        [article.date, article.category, article.readTime].filter(Boolean).forEach((item) => {
+            const metaItem = document.createElement("span");
+            metaItem.textContent = item;
+            meta.appendChild(metaItem);
+        });
+        body.appendChild(meta);
+
+        const title = document.createElement("span");
+        title.className = "article-card-title";
+        title.textContent = article.title;
+        body.appendChild(title);
+
+        if (article.description) {
+            const description = document.createElement("span");
+            description.className = "article-card-description";
+            description.textContent = article.description;
+            body.appendChild(description);
+        }
+
+        if (article.tags?.length) {
+            const tags = document.createElement("span");
+            tags.className = "article-card-tags";
+            article.tags.forEach((tag) => {
+                const tagItem = document.createElement("span");
+                tagItem.textContent = tag;
+                tags.appendChild(tagItem);
+            });
+            body.appendChild(tags);
+        }
+
+        card.appendChild(body);
+        return card;
+    };
+
+    const renderArticleCards = (container, articles) => {
+        container.textContent = "";
+
+        if (!articles.length) {
+            const empty = document.createElement("p");
+            empty.className = "article-empty";
+            empty.textContent = "文章正在整理中。";
+            container.appendChild(empty);
+            return;
+        }
+
+        articles.forEach((article) => {
+            container.appendChild(createArticleCard(article));
+        });
+    };
+
+    document.querySelectorAll("[data-recent-articles]").forEach((container) => {
+        const limit = Number.parseInt(container.dataset.limit || "3", 10);
+        renderArticleCards(container, articleItems.slice(0, limit));
+    });
+
+    const articleList = document.querySelector("[data-article-list]");
+
+    if (articleList) {
+        const pageSize = Number.parseInt(articleList.dataset.pageSize || "6", 10);
+        const totalPages = Math.max(1, Math.ceil(articleItems.length / pageSize));
+        const params = new URLSearchParams(window.location.search);
+        const requestedPage = Number.parseInt(params.get("page") || "1", 10);
+        const currentPage = Math.min(Math.max(requestedPage || 1, 1), totalPages);
+        const start = (currentPage - 1) * pageSize;
+        const pageArticles = articleItems.slice(start, start + pageSize);
+
+        renderArticleCards(articleList, pageArticles);
+
+        const pagination = document.querySelector("[data-article-pagination]");
+
+        if (pagination) {
+            pagination.textContent = "";
+
+            const createPageLink = (label, page, isDisabled = false, isActive = false) => {
+                const link = document.createElement(isDisabled ? "span" : "a");
+                link.className = "pagination-link";
+                link.textContent = label;
+
+                if (isActive) {
+                    link.classList.add("is-active");
+                    link.setAttribute("aria-current", "page");
+                }
+
+                if (isDisabled) {
+                    link.classList.add("is-disabled");
+                } else {
+                    link.href = page === 1 ? "./" : `./?page=${page}`;
+                }
+
+                return link;
+            };
+
+            pagination.appendChild(createPageLink("上一页", currentPage - 1, currentPage === 1));
+
+            for (let page = 1; page <= totalPages; page += 1) {
+                pagination.appendChild(createPageLink(String(page), page, false, page === currentPage));
+            }
+
+            pagination.appendChild(createPageLink("下一页", currentPage + 1, currentPage === totalPages));
+        }
+    }
+
     const gate = document.querySelector("[data-access-gate]");
 
     if (!gate) {

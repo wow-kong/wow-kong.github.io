@@ -8,12 +8,11 @@
     <link rel="stylesheet" href="assets/site.css">
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 </head>
-<body>
+<body data-site-root="">
     <header class="site-header">
         <nav class="nav nav-end" aria-label="主导航">
             <div class="nav-links">
-                <a href="#about">关于</a>
-                <a href="#profile">联系</a>
+                <a href="articles/">全部文章</a>
             </div>
         </nav>
     </header>
@@ -24,37 +23,15 @@
                 <p class="eyebrow">Personal Website</p>
                 <h1><span>把想法写清楚，</span><span>把产品做扎实。</span></h1>
                 <p class="hero-copy">NLP 算法工程师，长期关注 LLM 后训练、agent-based 对话系统、垂域大模型、多模态对齐与文本生成。</p>
-                <div class="hero-actions" aria-label="快捷入口">
-                    <a class="button button-primary" href="#about">关于我</a>
-                    <a class="button button-secondary" href="#profile">联系我</a>
-                </div>
             </div>
         </section>
 
-        <section class="section" id="about">
+        <section class="section home-content-section" id="articles">
             <div class="container">
-                <div class="section-heading">
-                    <div>
-                        <p class="section-kicker">About</p>
-                        <h2 class="section-title">一个可持续更新的技术文章与知识入口。</h2>
-                    </div>
-                    <p class="section-summary">以清晰的信息结构承载技术文章、研究笔记和公开联系入口。</p>
-                </div>
+                <div class="home-overview">
+                    <div class="article-card-grid home-article-stack" data-recent-articles data-limit="3" aria-label="最近技术文章"></div>
 
-                <div class="about-grid">
-                    <article class="about-panel">
-                        <p>我在 NLP 领域有较为广泛的实践经历，承担或参与过智能客服大模型、旅游领域 LLM、agent-based 对话机器人、图文对齐、标题生成与机器翻译等项目。</p>
-                        <p>我习惯把模型能力放进真实业务链路里验证：从数据构建、训练策略、离线评估，到线上实验和长期迭代，关注结果，也关注方法是否可复用。</p>
-                        <div class="skill-list" aria-label="关注方向">
-                            <span>NLP</span>
-                            <span>LLM Post-training</span>
-                            <span>Agent</span>
-                            <span>Multimodal</span>
-                            <span>Text Generation</span>
-                        </div>
-                    </article>
-
-                    <aside class="profile-panel sidebar-panel" id="profile" aria-label="个人侧边栏">
+                    <aside class="profile-panel contact-panel home-sidebar" id="profile" aria-label="个人联系方式">
                         <div class="profile-visual" role="img" aria-label="竹林和森林组成的安静自然场景"></div>
                         <div class="sidebar-content">
                             <div class="sidebar-intro">
@@ -95,7 +72,6 @@
                                 </div>
                                 <p class="contact-copy-status" id="contact-copy-status" role="status" aria-live="polite" hidden></p>
                             </div>
-
                         </div>
                     </aside>
                 </div>
@@ -110,6 +86,7 @@
             <span>Built for GitHub Pages.</span>
         </div>
     </footer>
+    <script src="assets/articles.js"></script>
     <script src="assets/site.js"></script>
 </body>
 </html>
