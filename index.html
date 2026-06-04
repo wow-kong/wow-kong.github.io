@@ -3,23 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Sun Zhifei 的个人主页，记录 NLP、LLM、对话系统与多模态相关项目经历。">
+    <meta name="description" content="Sun Zhifei 的个人主页，记录 NLP、LLM、对话系统与技术文章。">
     <title>Sun Zhifei | 个人主页</title>
     <link rel="stylesheet" href="assets/site.css">
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 </head>
 <body>
     <header class="site-header">
-        <nav class="nav" aria-label="主导航">
-            <a class="brand" href="#top" aria-label="返回首页">
-                <span class="brand-mark">SZ</span>
-                <span>Sun Zhifei</span>
-            </a>
+        <nav class="nav home-nav" aria-label="主导航">
             <div class="nav-links">
                 <a href="#about">关于</a>
-                <a href="experience.html">经历</a>
-                <a href="#projects">项目</a>
-                <a href="#writing">文章</a>
                 <a href="#profile">联系</a>
             </div>
         </nav>
@@ -28,12 +21,12 @@
     <main id="top">
         <section class="hero" aria-label="个人主页首屏">
             <div class="hero-inner">
-                <p class="eyebrow">Personal Website · sunzhifei.com</p>
+                <p class="eyebrow">Personal Website</p>
                 <h1><span>把想法写清楚，</span><span>把产品做扎实。</span></h1>
                 <p class="hero-copy">NLP 算法工程师，长期关注 LLM 后训练、agent-based 对话系统、垂域大模型、多模态对齐与文本生成。</p>
                 <div class="hero-actions" aria-label="快捷入口">
-                    <a class="button button-primary" href="#projects">查看项目</a>
-                    <a class="button button-secondary" href="experience.html">个人经历</a>
+                    <a class="button button-primary" href="#about">关于我</a>
+                    <a class="button button-secondary" href="#profile">联系我</a>
                 </div>
             </div>
         </section>
@@ -43,9 +36,9 @@
                 <div class="section-heading">
                     <div>
                         <p class="section-kicker">About</p>
-                        <h2 class="section-title">一个可持续更新的个人知识与作品入口。</h2>
+                        <h2 class="section-title">一个可持续更新的技术文章与知识入口。</h2>
                     </div>
-                    <p class="section-summary">以清晰的信息结构承载履历、项目案例、文章和公开联系入口。</p>
+                    <p class="section-summary">以清晰的信息结构承载技术文章、研究笔记和公开联系入口。</p>
                 </div>
 
                 <div class="about-grid">
@@ -62,7 +55,7 @@
                     </article>
 
                     <aside class="profile-panel sidebar-panel" id="profile" aria-label="个人侧边栏">
-                        <div class="profile-visual" role="img" aria-label="书桌、笔记本和电脑组成的工作场景"></div>
+                        <div class="profile-visual" role="img" aria-label="竹林和森林组成的安静自然场景"></div>
                         <div class="sidebar-content">
                             <div class="sidebar-intro">
                                 <p class="sidebar-label">Profile</p>
@@ -72,8 +65,8 @@
 
                             <div class="facts">
                                 <div class="fact">
-                                    <span>站点</span>
-                                    <strong>sunzhifei.com</strong>
+                                    <span>内容</span>
+                                    <strong>技术文章</strong>
                                 </div>
                                 <div class="fact">
                                     <span>方向</span>
@@ -87,94 +80,24 @@
 
                             <div class="sidebar-links" aria-label="侧边栏联系方式">
                                 <p class="sidebar-label">Contact</p>
-                                <a class="sidebar-link" href="mailto:real.szf@gmail.com">
-                                    <span>Email</span>
-                                    <strong>real.szf@gmail.com</strong>
-                                </a>
-                                <a class="sidebar-link" href="https://github.com/wow-kong">
-                                    <span>GitHub</span>
-                                    <strong>@wow-kong</strong>
-                                </a>
+                                <div class="contact-actions">
+                                    <button class="contact-link" type="button" data-copy-email="real.szf@gmail.com" aria-label="复制邮箱地址" title="复制邮箱">
+                                        <svg class="icon-stroke" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path d="M4 6h16v12H4z"></path>
+                                            <path d="m4 7 8 6 8-6"></path>
+                                        </svg>
+                                    </button>
+                                    <a class="contact-link" href="https://github.com/wow-kong" aria-label="访问 GitHub 主页" title="GitHub">
+                                        <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path d="M12 2.4a9.6 9.6 0 0 0-3 18.72c.48.09.66-.21.66-.47v-1.8c-2.68.58-3.25-1.14-3.25-1.14-.44-1.11-1.07-1.41-1.07-1.41-.87-.6.07-.59.07-.59.96.07 1.47.99 1.47.99.86 1.46 2.25 1.04 2.8.8.09-.62.34-1.04.61-1.28-2.14-.24-4.39-1.07-4.39-4.76 0-1.05.38-1.91.99-2.58-.1-.24-.43-1.22.09-2.55 0 0 .81-.26 2.64.99a9.1 9.1 0 0 1 4.8 0c1.83-1.25 2.64-.99 2.64-.99.52 1.33.19 2.31.09 2.55.62.67.99 1.53.99 2.58 0 3.7-2.25 4.51-4.4 4.75.35.3.66.89.66 1.8v2.65c0 .26.17.56.67.46A9.6 9.6 0 0 0 12 2.4Z"></path>
+                                        </svg>
+                                    </a>
+                                </div>
+                                <p class="contact-copy-status" id="contact-copy-status" role="status" aria-live="polite" hidden></p>
                             </div>
 
-                            <a class="sidebar-cta" href="experience.html">
-                                查看个人经历
-                                <span>↗</span>
-                            </a>
                         </div>
                     </aside>
-                </div>
-            </div>
-        </section>
-
-        <section class="section section-muted" id="projects">
-            <div class="container">
-                <div class="section-heading">
-                    <div>
-                        <p class="section-kicker">Projects</p>
-                        <h2 class="section-title">围绕语言模型与真实业务场景沉淀项目经验。</h2>
-                    </div>
-                    <p class="section-summary">从模型训练、生成策略到检索与多模态对齐，尽量把复杂问题拆成可验证、可复盘的工程路径。</p>
-                </div>
-
-                <div class="card-grid">
-                    <article class="card">
-                        <div class="card-top">
-                            <span class="tag">LLM</span>
-                            <span class="year">2025</span>
-                        </div>
-                        <h3>智能客服大模型后训练</h3>
-                        <p>参与客服领域 LLM 后训练与工具调用能力优化，探索适用于多轮客服对话的训练与评估链路。</p>
-                    </article>
-
-                    <article class="card">
-                        <div class="card-top">
-                            <span class="tag">Agent</span>
-                            <span class="year">2023</span>
-                        </div>
-                        <h3>携程问道</h3>
-                        <p>参与 ToC agent-based 对话机器人构建，覆盖旅游信息问答、产品推荐、行程规划与智能客服。</p>
-                    </article>
-
-                    <article class="card">
-                        <div class="card-top">
-                            <span class="tag">Multimodal</span>
-                            <span class="year">2021</span>
-                        </div>
-                        <h3>图文 Embedding</h3>
-                        <p>构建旅游领域图文对齐模型，为图文检索、图片向量表征和内容标签体系提供基础能力。</p>
-                    </article>
-                </div>
-            </div>
-        </section>
-
-        <section class="section" id="writing">
-            <div class="container">
-                <div class="section-heading">
-                    <div>
-                        <p class="section-kicker">Writing</p>
-                        <h2 class="section-title">论文、专利与开源贡献。</h2>
-                    </div>
-                    <p class="section-summary">除业务项目外，也保留研究、专利和工程社区相关的公开沉淀。</p>
-                </div>
-
-                <div class="post-list">
-                    <article class="post">
-                        <time datetime="2017">2017</time>
-                        <div>
-                            <h3>SCI 论文</h3>
-                            <p>Blind equalization of constant modulus signals based on gaussian process for classification.</p>
-                        </div>
-                        <a class="post-link" href="experience.html" aria-label="了解 SCI 论文">↗</a>
-                    </article>
-                    <article class="post">
-                        <time datetime="2021">2021</time>
-                        <div>
-                            <h3>专利与工程贡献</h3>
-                            <p>主题推荐理由获取相关专利；tensor2tensor contributor；《携程人工智能实践》作者之一。</p>
-                        </div>
-                        <a class="post-link" href="experience.html" aria-label="了解专利与工程贡献">↗</a>
-                    </article>
                 </div>
             </div>
         </section>
@@ -183,9 +106,10 @@
 
     <footer class="site-footer">
         <div class="footer-inner">
-            <span>© 2026 Sun Zhifei. All rights reserved.</span>
+            <span>© 2026. All rights reserved.</span>
             <span>Built for GitHub Pages.</span>
         </div>
     </footer>
+    <script src="assets/site.js"></script>
 </body>
 </html>
