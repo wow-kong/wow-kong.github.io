@@ -7,6 +7,8 @@ description: "用一句话说明这篇文章解决什么问题，以及读者能
 categories: ["NLP"]
 tags: ["LLM", "Post-training", "Agent"]
 thumbnail: /assets/article-hero-forest.jpg
+hero_image: /assets/article-hero-forest.jpg
+body_class:
 read_time: "6 min read"
 permalink: /articles/example-slug/
 published: false

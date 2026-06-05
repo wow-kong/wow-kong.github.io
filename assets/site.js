@@ -1,4 +1,68 @@
 (() => {
+    const siteNavItems = [
+        { key: "home", label: "主页", href: "" },
+        { key: "articles", label: "全部文章", href: "articles/" },
+        { key: "experience", label: "经历", href: "experience/" },
+        { key: "contact", label: "联系", href: "#profile" },
+    ];
+
+    const getSiteRoot = () => document.body.dataset.siteRoot || "";
+
+    const resolveSitePath = (path) => {
+        if (!path || /^(https?:|mailto:|#|\/)/.test(path)) {
+            return path || "";
+        }
+
+        return `${getSiteRoot()}${path}`;
+    };
+
+    const resolveNavPath = (path) => {
+        if (!path) {
+            return getSiteRoot() || "./";
+        }
+
+        if (/^(https?:|mailto:|\/)/.test(path)) {
+            return path;
+        }
+
+        if (path.startsWith("#")) {
+            return `${getSiteRoot() || "./"}${path}`;
+        }
+
+        return `${getSiteRoot()}${path}`;
+    };
+
+    const renderSiteHeader = () => {
+        document.querySelectorAll("[data-site-header]").forEach((header) => {
+            const activeSection = header.dataset.activeSection || document.body.dataset.activeSection || "";
+            const nav = document.createElement("nav");
+            const links = document.createElement("div");
+
+            nav.className = "nav nav-end";
+            nav.setAttribute("aria-label", "主导航");
+            links.className = "nav-links";
+
+            siteNavItems.forEach((item) => {
+                const link = document.createElement("a");
+                link.href = resolveNavPath(item.href);
+                link.textContent = item.label;
+
+                if (item.key === activeSection) {
+                    link.className = "active";
+                    link.setAttribute("aria-current", "page");
+                }
+
+                links.appendChild(link);
+            });
+
+            nav.appendChild(links);
+            header.textContent = "";
+            header.appendChild(nav);
+        });
+    };
+
+    renderSiteHeader();
+
     const copyButtons = document.querySelectorAll("[data-copy-email]");
     const copyStatus = document.querySelector("#contact-copy-status");
 
@@ -68,14 +132,6 @@
     const articleItems = (Array.isArray(window.SZF_ARTICLES) ? window.SZF_ARTICLES : [])
         .slice()
         .sort((current, next) => getArticleDateTime(next) - getArticleDateTime(current));
-
-    const resolveSitePath = (path) => {
-        if (!path || /^(https?:|mailto:|#|\/)/.test(path)) {
-            return path || "";
-        }
-
-        return `${document.body.dataset.siteRoot || ""}${path}`;
-    };
 
     const createArticleCard = (article) => {
         const card = document.createElement("a");
