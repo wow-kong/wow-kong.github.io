@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">confession 与常规 RL 交替训练</title>
+  <desc id="desc">训练步骤按概率进入常规 RL 或 confession RL，两个 reward 分别作用在不同输出上。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="#0b4844"/>
+    </marker>
+    <style>
+      .bg{fill:#f7faf8}.panel{fill:#fff;stroke:#d9ded8;stroke-width:2}.main{fill:#e8f0ed}.conf{fill:#f4eadb}.title{font:700 30px Inter,Arial,sans-serif;fill:#17211f}.label{font:700 22px Inter,Arial,sans-serif;fill:#17211f}.body{font:18px Inter,Arial,sans-serif;fill:#4b5d58}.note{font:700 18px Inter,Arial,sans-serif;fill:#0b4844}.arrow{stroke:#0b4844;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="560" rx="8"/>
+  <text class="title" x="60" y="70">Interleaved training</text>
+  <rect class="panel" x="70" y="160" width="220" height="100" rx="8"/>
+  <text class="label" x="105" y="202">Step i</text>
+  <text class="body" x="105" y="232">sample branch</text>
+  <path class="arrow" d="M295 210 H420"/>
+  <rect class="main" x="440" y="110" width="300" height="130" rx="8"/>
+  <text class="label" x="480" y="158">prob. 1 - p</text>
+  <text class="body" x="480" y="194">regular RL updates</text>
+  <text class="note" x="480" y="220">main answer reward</text>
+  <rect class="conf" x="440" y="300" width="300" height="130" rx="8"/>
+  <text class="label" x="480" y="348">prob. p</text>
+  <text class="body" x="480" y="384">confession RL updates</text>
+  <text class="note" x="480" y="410">confession reward only</text>
+  <path class="arrow" d="M745 175 H900"/>
+  <path class="arrow" d="M745 365 H900"/>
+  <rect class="panel" x="920" y="160" width="220" height="210" rx="8"/>
+  <text class="label" x="955" y="212">Separated</text>
+  <text class="body" x="955" y="248">main answer and</text>
+  <text class="body" x="955" y="278">self-report optimize</text>
+  <text class="body" x="955" y="308">different surfaces</text>
+</svg>
