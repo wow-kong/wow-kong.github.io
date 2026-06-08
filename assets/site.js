@@ -2,7 +2,6 @@
     const siteNavItems = [
         { key: "home", label: "主页", href: "" },
         { key: "articles", label: "全部文章", href: "articles/" },
-        { key: "experience", label: "经历", href: "experience/" },
         { key: "contact", label: "联系", href: "#profile" },
     ];
 
