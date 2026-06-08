@@ -7,7 +7,7 @@ const vm = require("vm");
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260605-8";
+const CSS_VERSION = "20260608-2";
 
 const HEADING_IDS = new Map([
   ["前言", "intro"],
@@ -165,11 +165,44 @@ const normalizeArticleHeroImage = (frontmatter, slug) => {
 };
 
 const inlineTokens = [];
+let activeFootnotes = null;
 
 const protectInlineToken = (html) => {
   const key = `\u0000INLINE_${inlineTokens.length}\u0000`;
   inlineTokens.push(html);
   return key;
+};
+
+const normalizeFootnoteId = (id, index) => {
+  const normalized = slugifyClass(id);
+  return normalized || `note-${index}`;
+};
+
+const renderFootnoteRef = (id) => {
+  if (!activeFootnotes) {
+    return `[^${id}]`;
+  }
+
+  const note = activeFootnotes.byId.get(id);
+  if (!note) {
+    return `[^${id}]`;
+  }
+
+  if (!note.index) {
+    note.index = activeFootnotes.nextIndex;
+    activeFootnotes.nextIndex += 1;
+    activeFootnotes.ordered.push(note);
+  }
+
+  const count = activeFootnotes.refCounts.get(id) || 0;
+  activeFootnotes.refCounts.set(id, count + 1);
+
+  const refId = count ? `fnref-${note.htmlId}-${count + 1}` : `fnref-${note.htmlId}`;
+  if (!note.backref) {
+    note.backref = refId;
+  }
+
+  return `<sup class="footnote-ref" id="${escapeAttr(refId)}"><a href="#fn-${escapeAttr(note.htmlId)}">${note.index}</a></sup>`;
 };
 
 const renderInline = (rawText = "") => {
@@ -181,12 +214,16 @@ const renderInline = (rawText = "") => {
     )
     .replace(/\$([^$\n]+)\$/g, (_, tex) =>
       protectInlineToken(`<span class="math">\\(${escapeHtml(tex.trim())}\\)</span>`)
+    )
+    .replace(/\[\^([^\]]+)]/g, (_, id) =>
+      protectInlineToken(renderFootnoteRef(id))
     );
 
   text = escapeHtml(text);
 
   text = text
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
       const safeHref = href.replace(/&amp;/g, "&");
       return `<a href="${escapeAttr(safeHref)}">${label}</a>`;
@@ -205,6 +242,8 @@ const countIndent = (line) => {
 };
 
 const isFence = (line) => line.trim().startsWith("```");
+const isDisplayMathDelimiter = (line) => line.trim() === "$$";
+const isHorizontalRule = (line) => /^-{3,}$|^\*{3,}$|^_{3,}$/.test(line.trim());
 const isHeading = (line) => /^#{1,6}\s+/.test(line.trim());
 const isBlockquote = (line) => line.trim().startsWith(">");
 const isImage = (line) => /^!\[[^\]]*]\([^)]+\)$/.test(line.trim());
@@ -244,6 +283,9 @@ const renderTable = (rows) => {
     "</table>",
   ].join("\n");
 };
+
+const renderDisplayMath = (mathLines) =>
+  `<div class="math math-display">\\[\n${escapeHtml(mathLines.join("\n"))}\n\\]</div>`;
 
 const renderBlockquote = (quoteLines, context) => {
   const contentLines = quoteLines.map((line) => line.replace(/^\s*>\s?/, ""));
@@ -374,6 +416,8 @@ const isParagraphBoundary = (lines, index) => {
 
   return (
     isFence(line) ||
+    isDisplayMathDelimiter(line) ||
+    isHorizontalRule(line) ||
     isHeading(line) ||
     isBlockquote(line) ||
     isImage(line) ||
@@ -391,6 +435,26 @@ const renderBlocks = (lines, context) => {
 
     if (!line.trim()) {
       index += 1;
+      continue;
+    }
+
+    if (isHorizontalRule(line)) {
+      context.hasRenderedContent = true;
+      html.push("<hr>");
+      index += 1;
+      continue;
+    }
+
+    if (isDisplayMathDelimiter(line)) {
+      const mathLines = [];
+      index += 1;
+      while (index < lines.length && !isDisplayMathDelimiter(lines[index])) {
+        mathLines.push(lines[index]);
+        index += 1;
+      }
+      index += index < lines.length ? 1 : 0;
+      context.hasRenderedContent = true;
+      html.push(renderDisplayMath(mathLines));
       continue;
     }
 
@@ -465,8 +529,53 @@ const renderBlocks = (lines, context) => {
   };
 };
 
-const renderMarkdown = (markdown) => {
+const extractFootnotes = (markdown) => {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const contentLines = [];
+  const footnotes = [];
+
+  lines.forEach((line) => {
+    const match = line.match(/^\[\^([^\]]+)]:\s*(.*)$/);
+    if (!match) {
+      contentLines.push(line);
+      return;
+    }
+
+    const index = footnotes.length + 1;
+    footnotes.push({
+      id: match[1],
+      htmlId: normalizeFootnoteId(match[1], index),
+      definitionIndex: index,
+      index: 0,
+      text: match[2],
+      backref: "",
+    });
+  });
+
+  return {
+    content: contentLines.join("\n"),
+    footnotes,
+  };
+};
+
+const renderFootnotes = (footnotes) => {
+  if (!footnotes.length) {
+    return "";
+  }
+
+  const items = footnotes
+    .map((note) => {
+      const backref = note.backref || `fnref-${note.htmlId}`;
+      return `  <li id="fn-${escapeAttr(note.htmlId)}"><p>${renderInline(note.text)} <a class="footnote-backref" href="#${escapeAttr(backref)}" aria-label="返回正文">返回</a></p></li>`;
+    })
+    .join("\n");
+
+  return `<ol class="article-footnotes">\n${items}\n</ol>`;
+};
+
+const renderMarkdown = (markdown) => {
+  const { content, footnotes } = extractFootnotes(markdown);
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
   const context = {
     hasRenderedContent: false,
     headingIdCounts: new Map(),
@@ -474,7 +583,30 @@ const renderMarkdown = (markdown) => {
     sectionCount: 0,
   };
 
-  return renderBlocks(lines, context);
+  const previousFootnotes = activeFootnotes;
+  activeFootnotes = {
+    byId: new Map(footnotes.map((note) => [note.id, note])),
+    refCounts: new Map(),
+    ordered: [],
+    nextIndex: 1,
+  };
+
+  const rendered = renderBlocks(lines, context);
+  const unreferencedFootnotes = footnotes
+    .filter((note) => !note.index)
+    .sort((current, next) => current.definitionIndex - next.definitionIndex)
+    .map((note) => {
+      note.index = activeFootnotes.nextIndex;
+      activeFootnotes.nextIndex += 1;
+      return note;
+    });
+  const footnotesHtml = renderFootnotes([...activeFootnotes.ordered, ...unreferencedFootnotes]);
+  activeFootnotes = previousFootnotes;
+
+  return {
+    html: [rendered.html, footnotesHtml].filter(Boolean).join("\n"),
+    headings: rendered.headings,
+  };
 };
 
 const formatTags = (tags = []) =>
@@ -517,7 +649,8 @@ const renderArticlePage = ({ slug, frontmatter, contentHtml, headings }) => {
     <script>
         window.MathJax = {
             tex: {
-                inlineMath: [["\\\\(", "\\\\)"], ["$", "$"]]
+                inlineMath: [["\\\\(", "\\\\)"], ["$", "$"]],
+                displayMath: [["\\\\[", "\\\\]"], ["$$", "$$"]]
             },
             options: {
                 skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
@@ -577,7 +710,7 @@ ${formatToc(headings)}
             <span>Built for GitHub Pages.</span>
         </div>
     </footer>
-    <script src="../../assets/site.js?v=20260605-7"></script>
+    <script src="../../assets/site.js?v=20260608-1"></script>
 </body>
 </html>
 `;

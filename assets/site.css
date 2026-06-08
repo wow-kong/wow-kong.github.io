@@ -534,6 +534,10 @@ main {
     font-weight: 900;
 }
 
+.article-content em {
+    font-style: italic;
+}
+
 .article-content code {
     border-radius: 6px;
     padding: 0.15em 0.35em;
@@ -581,11 +585,24 @@ main {
     margin-top: 10px;
 }
 
+.article-content hr {
+    margin: 34px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+}
+
 .math {
     display: inline;
     padding: 0 0.08em;
     color: #17211f;
     white-space: nowrap;
+}
+
+.math-display {
+    display: block;
+    overflow-x: auto;
+    padding: 8px 0;
+    white-space: normal;
 }
 
 .math mjx-container {
@@ -625,6 +642,37 @@ main {
 
 .article-content tr:last-child td {
     border-bottom: 0;
+}
+
+.footnote-ref {
+    font-size: 0.72em;
+    line-height: 0;
+    vertical-align: super;
+}
+
+.article-content .footnote-ref a {
+    border-bottom: 0;
+    font-weight: 800;
+}
+
+.article-footnotes {
+    margin-top: 28px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.94rem;
+}
+
+.article-footnotes p {
+    margin: 0;
+}
+
+.article-content .footnote-backref {
+    margin-left: 6px;
+    border-bottom: 0;
+    color: var(--brand-dark);
+    font-size: 0.86em;
+    font-weight: 800;
 }
 
 .article-callout {
