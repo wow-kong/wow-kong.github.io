@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="梳理 LongCat-Flash-Thinking-2601 如何围绕环境、任务、冷启动、异步 RL 框架和上下文管理强化 agentic reasoning 能力。">
+    <title>LongCat-Flash-Thinking-2601：Agentic Reasoning 技术分享 | Sun Zhifei</title>
+    <link rel="stylesheet" href="../../assets/site.css?v=20260608-2">
+    <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["\\(", "\\)"], ["$", "$"]],
+                displayMath: [["\\[", "\\]"], ["$$", "$$"]]
+            },
+            options: {
+                skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+            }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body data-site-root="../../" data-active-section="articles">
+    <header class="site-header" data-site-header></header>
+
+    <main>
+        <article>
+            <section class="article-hero" aria-label="文章标题区" style="--article-hero-image: url(&quot;../articles/longcat-flash-thinking-2601/assets/longcat-agentic-hero.jpg&quot;)">
+                <div class="hero-inner">
+                    <p class="eyebrow">Technical Notes · LLM Alignment</p>
+                    <h1>LongCat-Flash-Thinking-2601：Agentic Reasoning 技术分享</h1>
+                    <p class="hero-copy">梳理 LongCat-Flash-Thinking-2601 如何围绕环境、任务、冷启动、异步 RL 框架和上下文管理强化 agentic reasoning 能力。</p>
+                    <div class="article-meta" aria-label="文章元信息">
+                        <span>2026-02-13</span>
+                        <span>LLM Alignment</span>
+                        <span>13 min read</span>
+                    </div>
+                    <div class="tags" aria-label="文章标签">
+                        <span>LLM</span>
+                        <span>Agentic Reasoning</span>
+                        <span>RL</span>
+                        <span>Tool Use</span>
+                        <span>LongCat</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="article-shell">
+                <div class="container article-layout">
+                    <div class="article-content">
+<div class="article-callout">
+<p>💡 <a href="https://arxiv.org/pdf/2601.16725"><strong>LongCat-Flash-Thinking-2601</strong></a>：在 LongCat-Flash 系列基础上，通过 mid-training 和 post-training 重点强化模型的 <strong>agentic reasoning</strong> 能力。</p>
+</div>
+<p>相比传统 reasoning 行为，agentic 场景通常涉及 long-horizon 轨迹。现实语料中这类交互轨迹非常稀缺，导致原始模型并不天然熟悉多轮、多步、带工具反馈的任务推进方式。</p>
+<h2 id="section-1">背景</h2>
+<p>目前大模型在数学、代码、复杂推理任务上已经取得巨大突破，部分能力接近甚至超过人类专家水平，<strong>内在推理能力正在逼近上限</strong>。</p>
+<p>但真实世界任务并不总是封闭式、单次推理任务。由于自然语料中涉及 agentic 行为的内容天然稀缺，模型的 <strong>agentic 行为不稳定、效率低、效果差，只会想、不会做</strong>，这极大限制了模型处理复杂问题的能力上限。</p>
+<p>因此，下一阶段的突破来自于 <strong>与外部环境交互的能力，也就是 Agentic Reasoning</strong>：</p>
+<ul>
+  <li><p>通过与外部环境的自适应交互解决复杂问题。</p></li>
+  <li><p>学会判断使用时机、使用目标、使用方法、过程容错和信息整合。</p></li>
+  <li><p>在多轮、多步交互中持续推进任务，而不是停留在单次回答。</p></li>
+</ul>
+<p>LongCat 团队的目标，是将大模型 <strong>从强推理模型升级为可泛化、可交互、可扩展、可在真实环境中稳定运行的 Agentic 系统</strong>，让推理与交互行为真正融合。</p>
+<p>为此，论文围绕 long-horizon trajectory、异构环境、长尾交互模式三大核心难点，在算法、数据、环境构造与系统层面完成了全链路协同设计。</p>
+<h2 id="section-2">数据构建</h2>
+<h3 id="section-3">环境构建</h3>
+<p>不同于传统 reasoning 主要在语义空间内推理，agentic reasoning 的强化必然涉及环境构建。<strong>环境决定了模型的行为集合</strong>，并且需要面对异构性、可执行可验证、规模化等挑战。</p>
+<p>文章主要介绍了 coding 和常规 agentic tool-use 两个场景下的环境构建方式。</p>
+<h4 id="code-sandbox">Code Sandbox</h4>
+<p>Code Sandbox 是一个允许 agent 通过终端工具实时交互的可执行沙箱，已经成为强化 coding 类任务的必要条件之一。LongCat 团队主要做了两点优化：</p>
+<ol>
+  <li><p>将常用工具整合到标准化环境接口中，包括搜索、文件读写、代码编辑、shell 执行。</p></li>
+  <li><p>设计高并发 sandbox 调度系统，支持沙箱的异步创建、任务分发、自动回收，降低大规模训练下的环境启动和阻塞开销。</p></li>
+</ol>
+<h4 id="agentic-tool-use">Agentic Tool-Use</h4>
+<p>Agentic reasoning 能力的 <strong>核心在于泛化</strong>。模型需要在足够多样的环境中反复试错，学会有效的推理和交互行为，并泛化到更多陌生场景。</p>
+<p>为了获取足够多样的环境，手工构造显然不可行。LongCat 团队设计了一个用于环境自动生成的 pipeline，核心分为三步。</p>
+<h5 id="domain-graph">Domain graph 构建</h5>
+<p>基于 domain 描述生成 tools、database 等环境必要元素。在 20+ 个领域下完成 domain graph 构建，每个 domain 有 60+ 可用工具，整体可用率 95%+。</p>
+<figure class="article-figure">
+  <img src="assets/domain-graph.png" alt="Domain graph 构建流程">
+  <figcaption>Domain graph 构建流程</figcaption>
+</figure>
+<p>Domain graph 构建包括：</p>
+<ol>
+  <li><p>schema 定义：从 domain 定义出发，生成 <strong>工具 schema 集合</strong>，并根据工具功能抽象出统一的 <strong>数据库 schema</strong>。</p></li>
+  <li><p>逻辑补全：结合工具 schema 和数据库 schema，将每个 tool 变成 <strong>真实可执行的 database 交互工具</strong>。为确保代码生成结果正确、稳健，生成代码会通过单元测试验证。</p></li>
+  <li><p>依赖分析：从已有工具中构建工具依赖 DAG 图，用于后续环境构建及扩展。例如 <code>tool_b</code> 的输入源于 <code>tool_a</code> 的输出，则构成一条 <code>tool_a -&gt; tool_b</code> 的有向边。</p></li>
+</ol>
+<h5 id="section-4">可执行环境构建</h5>
+<p>从工具 DAG 图中采样工具调用链路，完成可执行环境构建。</p>
+<figure class="article-figure">
+  <img src="assets/executable-environment.png" alt="可执行环境构建流程">
+  <figcaption>可执行环境构建流程</figcaption>
+</figure>
+<p>可执行环境构建包括：</p>
+<ol>
+  <li><p>子链采样：从工具 DAG 图中采样一条工具调用链路 <span class="math">\(s_1 \subset G\)</span>。</p></li>
+  <li><p>实例化数据库：针对 <span class="math">\(s_1\)</span> 中的每个工具，依次实例化工具涉及的数据库状态。</p></li>
+  <li><p>任务生成：基于 <span class="math">\(s_1\)</span> 生成任务，包括任务描述、user profile、evaluation rubrics。</p></li>
+  <li><p>环境校验：对生成环境进行多次一致性校验，确保正确 tool chains 能通过 rubrics 验证，错误或残缺的 tool chains 无法通过验证。</p></li>
+</ol>
+<h5 id="section-5">环境扩展</h5>
+<p>除 domain 多样性以外，难度多样性同样重要。LongCat 团队认为任务难度主要源于 <strong>交互复杂性</strong> 和 <strong>环境复杂性</strong>。</p>
+<ol>
+  <li><p>交互复杂性体现为不同程度的澄清、规划和多步交互，从而鼓励模型展现丰富、适应性的 agentic 行为。</p></li>
+  <li><p>环境复杂性体现为完成任务所需的工具个数和工具调用链路。</p>
+<ul>
+  <li><p>环境复杂性的提升相对直接，也是本文主要的环境扩展方式：向 <span class="math">\(s_1\)</span> 中引入更多工具调用节点。</p></li>
+  <li><p>具体做法是遍历 <span class="math">\(s_1\)</span> 未使用的工具集合 <span class="math">\(D_1 = G \backslash s_1\)</span>，通过引入所有依赖均被满足的工具，使现有工具调用链路 <span class="math">\(s_1\)</span> 更复杂，并确保每个合成环境至少包含 20 个工具。</p></li>
+</ul></li>
+</ol>
+<pre><code class="language-text"># 工具 DAG 图
+A. {&quot;name&quot;: &quot;createUser&quot;, &quot;description&quot;: &quot;创建用户&quot;}
+B. {&quot;name&quot;: &quot;addAddress&quot;, &quot;description&quot;: &quot;给用户添加地址&quot;}
+C. {&quot;name&quot;: &quot;createOrder&quot;, &quot;description&quot;: &quot;创建订单&quot;}
+D. {&quot;name&quot;: &quot;addItem&quot;, &quot;description&quot;: &quot;给订单加商品&quot;}
+E. {&quot;name&quot;: &quot;applyCoupon&quot;, &quot;description&quot;: &quot;给订单加优惠券&quot;}
+F. {&quot;name&quot;: &quot;processPayment&quot;, &quot;description&quot;: &quot;支付订单&quot;}
+G. {&quot;name&quot;: &quot;refundOrder&quot;, &quot;description&quot;: &quot;退款&quot;}
+H. {&quot;name&quot;: &quot;generateInvoice&quot;, &quot;description&quot;: &quot;生成物流订单&quot;}
+I. {&quot;name&quot;: &quot;queryLogisticsStatus&quot;, &quot;description&quot;: &quot;查询物流状态&quot;}
+
+A - B
+  - C - D
+      - E
+      - F - G
+          - H - I
+
+# 子链采样
+s1 = {A - C - D - F}  # 创建用户 - 创建订单 - 添加商品 - 支付
+数据库依赖：用户、订单已创建，商品已添加，订单已支付
+
+# 基于 BFS 的环境复杂化
+遍历 s1 外的节点：
+- B/G/H 由于前置依赖均已满足，可以考虑加入 s1
+  {A - C - D - F - G}
+  {A - C - D - F - H}
+  {A - B - C - D - F}
+- I 由于涉及额外的数据库依赖（物流订单号），无法加入 s1</code></pre>
+<h3 id="section-6">任务构建</h3>
+<p>在 RL 中，<strong>环境决定 agent 能做什么，task 决定 agent 要做什么</strong>。一个好的 task 必须满足：</p>
+<ol>
+  <li><p>信息充分：能有效区分 policy 质量，产生有效梯度信号。</p></li>
+  <li><p>难度适中：确保模型能但又不总是能 rollout 出期望轨迹。</p></li>
+</ol>
+<p>不同领域的 task 分布天然存在很大差异。Coding 领域有大量复杂且高质量的任务，但 agentic search、tool-use 场景下的任务就十分稀缺。</p>
+<h4 id="agentic-search">Agentic Search</h4>
+<p>LongCat 团队将搜索类任务的难度归因于 <strong>多跳关系推理</strong> 和 <strong>歧义约束推理</strong>，并针对这两点构建复杂 task。</p>
+<h5 id="graph-based-qa">Graph-based QA</h5>
+<p>针对多跳关系推理，合成 <strong>存在明确链式推理流程</strong> 的任务，强制模型必须依赖推理，而不是仅靠关键词匹配完成任务。</p>
+<p>Graph-based QA 包含：</p>
+<ol>
+  <li><p>基于 wiki 构建 mini KG：采样 wiki 中的低频实体，同时不断扩展实体关系 graph。</p></li>
+  <li><p>问题生成：采样 sub-graph 用于问题生成。</p></li>
+  <li><p>问题复杂化：刻意隐藏数字、位置、时间、实体名称等明确细节，最大限度增加推理复杂度。</p></li>
+  <li><p>质量过滤：去除存在歧义解的问题。</p></li>
+</ol>
+<pre><code class="language-text"># 实体采样
+Entity A: Film X
+
+# 关系图构建
+Film X
+   |-- releasedIn -&gt; 1998
+   `-- directedBy -&gt; Director Y
+                        `-- bornIn -&gt; City Z
+                                         |-- locatedIn -&gt; Europe
+                                         `-- CapitalOf -&gt; Country W
+
+# 子图采样
+Film X -&gt; Director Y -&gt; City Z -&gt; Country W
+
+# 问题生成
+Which country is the birthplace of the director of Film X?
+
+# 模糊化
+The director of a certain film released in 1998 was born in a city
+that is the capital of a European country. Which country is it?</code></pre>
+<h5 id="agent-based-qa">Agent-based QA</h5>
+<p>针对歧义约束推理，合成 <strong>存在多个歧义解、需要结合限制条件给出最符合要求答案</strong> 的任务。具体通过由 FSM 控制的 MAS 系统进行问题合成：</p>
+<ol>
+  <li><p>实体抽取 agent：识别有代表性的长尾实体并提取其 <strong>显著属性</strong>，这些属性作为合成问题的基础真实信息。</p></li>
+  <li><p>问题合成 agent：对抽取出的显著属性随机采样，制定针对性问题。</p></li>
+  <li><p>验证 agent：利用搜索和浏览工具严格验证基础真实信息是否满足问题中的所有约束条件，降低实体与问题不匹配的风险。</p></li>
+  <li><p>答案生成 agent：利用搜索和浏览工具生成候选答案。</p></li>
+  <li><p>Judge agent：评估候选答案与预定义基础真实信息之间的一致性。</p></li>
+</ol>
+<pre><code class="language-text"># 实体抽取
+&lt;Scientist A, attends, University U&gt;
+
+# 问题合成
+Which university did Scientist A attend?
+
+# 问题验证
+&gt; Scientist A attended two universities.
+Which university did Scientist A attend after he got married?
+
+# 答案生成
+University U</code></pre>
+<h4 id="agentic-tool-use-2">Agentic Tool-Use</h4>
+<p>Tool-use task 在生成环境时同步定义。也就是说，环境构建不仅产出可执行工具和数据库状态，也同时产出任务描述、用户画像和 evaluation rubrics。</p>
+<h3 id="section-7">冷启动</h3>
+<p>冷启动阶段的目标不在于 benchmark 分数有多高，而是希望模型在当前任务下具备稳定、多样的行为模式，<strong>为 RL 阶段的充分 explore 奠定基础</strong>。因此，冷启动数据必须满足：</p>
+<ol>
+  <li><p>能完成 RL 目标。</p></li>
+  <li><p>保持通用 thinking 能力。</p></li>
+  <li><p>推理路径多样化。</p></li>
+  <li><p>交互格式稳定。</p></li>
+</ol>
+<h4 id="general-thinking">General Thinking</h4>
+<p>Agentic 能力以通用 thinking 能力为基础。为了收集高质量数据，文章结合 <strong>KCG 与滑窗 PPL</strong> 进行数据筛选，收集尽可能多样、能充分暴露模型当前 thinking 能力缺陷的 210k 数据用于模型冷启动。</p>
+<p>传统 PPL 过滤容易被全序列平均稀释，LongCat 团队引入 sliding-window PPL：在序列内用窗口计算局部 PPL 峰值，从而捕捉模型真正不确定、但对训练有信息量的片段。</p>
+<h4 id="agentic-coding">Agentic Coding</h4>
+<p>在 math、coding 等场景下，现实世界中存在大量数据源，此时主要问题在于轨迹的筛选与整合。LongCat 团队通过严格的质量控制和可执行性验证确保轨迹质量：</p>
+<ol>
+  <li><p>确保每条进入冷启动阶段的轨迹，在 <strong>可复现的环境中完全可执行且可验证</strong>。</p></li>
+  <li><p>为避免幻觉，移除错误及冗余操作。</p></li>
+  <li><p>通过压缩早期步骤，保留 long-horizon 推理和迭代式调试过程。</p></li>
+</ol>
+<h4 id="agentic-search-2">Agentic Search</h4>
+<p>对于 search、tool-use 等大多数智能体任务，高质量的现实世界轨迹在很大程度上是 <strong>不存在</strong> 的，因此需要设计相应的 <strong>数据合成流程</strong> 来构建冷启动轨迹。</p>
+<p>为了确保轨迹的正确性、完整性，以及对 shortcut 行为的鲁棒性，合成轨迹时需要：</p>
+<ol>
+  <li><p>强制要求推理和 tool-use 格式一致。</p></li>
+  <li><p>强制要求轨迹包含 query 中所有条件的完整性验证，禁止基于部分信息的 shortcuts。</p></li>
+  <li><p>通过压缩早期步骤，保留 long-horizon 推理。</p></li>
+</ol>
+<h4 id="agentic-tool-use-3">Agentic Tool-Use</h4>
+<p>Tool-use 冷启动的主要难点在于异构环境下的交互行为建模。基于环境构建 pipeline，LongCat 团队继续构建轨迹合成 pipeline，并从 <strong>多样性</strong> 和 <strong>质量</strong> 两个角度进行筛选：</p>
+<ol>
+  <li><p>多样性：每个任务可能有多种 tool-use 使用路径、对话风格和行为模式。</p></li>
+  <li><p>质量：所有轨迹必须经过 verify；训练时对异常轮次进行 mask，例如失败的工具调用或格式违规。</p></li>
+</ol>
+<h2 id="agentic-rl-dora">异步 Agentic RL 框架：DORA</h2>
+<p>传统 Agentic RL 一般需要等整个 batch rollout 完再一起训练。一个 rollout 包含 <code>LLM 生成 -&gt; 调工具 -&gt; 等环境返回 -&gt; 再生成 -&gt; 再调工具</code> 等多个步骤，因此通常是 <strong>多轮、长轨迹、环境返回存在执行延迟、不同样本长度差异巨大</strong>，短板效应明显，GPU 利用率极低。</p>
+<p>为此，LongCat 团队提出异步 Agentic RL 框架 DORA：rollout 生成好后立即进入训练队列，不必等待整个 batch。</p>
+<figure class="article-figure">
+  <img src="assets/dora-architecture.png" alt="DORA 异步 Agentic RL 框架">
+  <figcaption>DORA 异步 Agentic RL 框架</figcaption>
+</figure>
+<p>DORA 的核心结构包括：</p>
+<ol>
+  <li><p><strong>RolloutManager</strong>：负责管理 rollout 过程、调度 LLM 和环境、收集 reward，是完全异步的单样本级 streaming。系统同时将 RolloutManager 拆分为轻量级 RolloutManager 和多个 RolloutController。前者管理全局控制元数据，后者以 DP 方式各自管理一组环境，保证大量环境可以高效部署。</p></li>
+  <li><p><strong>SampleQueue</strong>：控制样本新鲜度。在异步系统中，有些样本由旧模型生成，有些由新模型生成，因此需要解决样本过期问题。</p></li>
+  <li><p><strong>Trainer</strong>：负责经验构造、GSPO 优化和参数更新，训练可以和 rollout 并行。</p></li>
+</ol>
+<p>DORA 还采用了 <strong>Prefill-Decode 分离</strong>。Agentic RL 任务中 context 很长、请求频繁，Prefill 是计算密集型，Decode 是访问密集型。两者混跑会互相拖慢，尤其在大规模 MoE 和长轨迹 RL 下会明显降低吞吐。</p>
+<figure class="article-figure">
+  <img src="assets/prefill-decode-separation.png" alt="Prefill-Decode 分离">
+  <figcaption>Prefill-Decode 分离</figcaption>
+</figure>
+<h2 id="rl">RL 训练</h2>
+<h3 id="rl-2">通用 RL 策略</h3>
+<p>在大规模 RL 中，训练集涵盖的 <strong>任务难度差异极大</strong>。如果对所有任务做简单统一处理，往往会导致学习效率低下。</p>
+<p>为此，LongCat 团队设计了一套训练策略，<strong>确保将计算资源集中在当前最高效的 task 上</strong>：</p>
+<ol>
+  <li><p><strong>双轴课程学习</strong>：从任务和能力两个角度对 task 进行分级。</p></li>
+  <li><p>难度维度：通过 <code>pass@K</code> 排序，先学简单样本，再学难样本。</p></li>
+  <li><p>能力维度：先学基础 tool-use，再学多步规划，再学复杂组合。</p></li>
+  <li><p><strong>预算动态分配</strong>：通过 <span class="math">\(v_{i,t}=V(\tau_i|\pi_{\theta_t}, \boldsymbol{m}_t)\)</span> 估计任务价值，用 heap-based greedy algorithm 分配 rollout 预算。模型现在弱在哪，就多 rollout 哪种 task。</p></li>
+  <li><p><strong>自校验</strong>：将自验证加入奖励信号。当生成 RL 趋于平缓时，把自验证作为辅助任务加速模型收敛。</p></li>
+</ol>
+<h3 id="agentic-rl">Agentic RL 策略</h3>
+<p>传统 RL 一般侧重于稳定策略优化、提高样本效率，以及 explore 与 exploit 之间的权衡。但 Agentic RL 下会出现新的问题：多轮交互与不可预测的环境反馈容易导致 context 爆炸，进而超出 <code>max_len</code>、轨迹不完整，破坏训练信号。</p>
+<p>为了在不牺牲 reasoning 质量的情况下控制上下文长度，LongCat 团队提出了新的 context 管理策略：</p>
+<ol>
+  <li><p><strong>Summary-based</strong>：超过 80K token 后，将历史 tool call 压缩成 summary，并专门构造 15K 总结数据用于冷启动。</p></li>
+  <li><p><strong>Discard-based</strong>：超限后丢弃全部 tool-use 历史，重新开始生成，类似 DeepSeek 系列做法。</p></li>
+  <li><p><strong>Hybrid</strong>：本文采用的方法，将 Summary-based 与 Discard-based 结合。当 <code>seq_len &gt; 80K</code> 时先触发 summary；当交互轮次持续增加、超过阈值时触发 reset。</p></li>
+</ol>
+<figure class="article-figure">
+  <img src="assets/context-management.png" alt="上下文管理策略">
+  <figcaption>上下文管理策略</figcaption>
+</figure>
+<p>通过观察 RL steps 与 benchmark score 曲线，各 benchmark 分数随着 RL 流程稳步上升，验证了 agentic 环境合成流程的有效性，以及 agentic reasoning 的泛化能力。</p>
+<figure class="article-figure">
+  <img src="assets/rl-benchmark-curve.png" alt="RL 训练过程中的 benchmark 曲线">
+  <figcaption>RL 训练过程中的 benchmark 曲线</figcaption>
+</figure>
+<p>考虑到真实世界中存在噪声环境，例如 API 失败、返回错误、数据不一致，训练中还会主动注入噪声，并用 curriculum 逐步增加噪声强度，让模型学会 retry、fallback、自我纠错：</p>
+<ol>
+  <li><p><strong>Instruction noise</strong>：模拟交互过程中的模糊性、可变性。</p></li>
+  <li><p><strong>Tool-use noise</strong>：模拟外部工具返回失败、不一致、不完整等行为。</p></li>
+</ol>
+<figure class="article-figure">
+  <img src="assets/noise-curriculum.png" alt="噪声注入与 curriculum">
+  <figcaption>噪声注入与 curriculum</figcaption>
+</figure>
+<h2 id="section-8">模型评测</h2>
+<div class="article-callout">
+<p>💡 LongCat-Flash-Thinking-2601 在传统 reasoning 任务上具有竞争力，同时在 agentic reasoning 上具有明显优势：在保持顶级数学和通用能力的前提下，agentic tool-use 能力在开源模型中达到 SOTA。</p>
+</div>
+<figure class="article-figure">
+  <img src="assets/evaluation-results.png" alt="LongCat-Flash-Thinking-2601 评测结果">
+  <figcaption>LongCat-Flash-Thinking-2601 评测结果</figcaption>
+</figure>
+<p>评测结果可以从几个角度理解：</p>
+<ol>
+  <li><p><strong>数学推理</strong>：处于第一梯队水平，Heavy mode 下接近顶级闭源模型。AIME-2025 在 Heavy mode 下取得满分；IMO-AnswerBench 得分 86.8，属于 SOTA 水平；AMO-Bench 下为开源 SOTA。</p></li>
+  <li><p><strong>Agentic Search</strong>：在 BrowseComp 和 BrowseComp-ZH 上 SOTA。</p></li>
+  <li><p><strong>Agentic Tool-Use</strong>：<code>tau2-Bench</code> 表现仅次于 Gemini-3-Pro。</p></li>
+  <li><p><strong>General QA</strong>：通用 QA 没有因 agentic 训练而退化，强度仍然在线。</p></li>
+  <li><p><strong>Coding</strong>：虽然不是第一，但仍属于第一梯队。</p></li>
+</ol>
+<p>需要注意的是，LongCat 在 math 评测时允许模型使用代码；BrowseComp 与 tool-use 相关 benchmark 也有一定修改。</p>
+<h2 id="section-9">总结与思考</h2>
+<p>相比 K2-Thinking、DeepSeek-V3.2、MiMo-V2-Flash 等开源模型，LongCat-Flash-Thinking-2601 可以看作是 agentic reasoning 路线的一次系统化整合。</p>
+<p>它的价值主要体现在两点：</p>
+<ol>
+  <li><p>给出了更加详尽、完备的数据构成思路，并且数据合成 pipeline 始终贯彻 agentic RL 的基本原则：<strong>可执行、可验证</strong>。</p></li>
+  <li><p>RL 中也针对实际会遇到的问题给出了解法：课程学习与计算资源合理分配、环境异构、上下文管理、噪声鲁棒性。</p></li>
+</ol>
+<p>Agentic RL 的方法方向一直相对明确。LongCat 团队的 contribution，不仅在于把方法落地，也在于回答了强化 agentic reasoning 的意义：不同于传统 reasoning 数据，这类语料在真实世界是稀缺甚至不存在的，因此需要定向合成和强化，让模型突破只会想的桎梏。</p>
+                    </div>
+
+                    <aside class="article-aside" aria-label="文章侧边栏">
+                        <h2>目录</h2>
+                        <nav class="article-toc" aria-label="文章目录">
+                            <a class="toc-level-2" href="#section-1">背景</a>
+                            <a class="toc-level-2" href="#section-2">数据构建</a>
+                            <a class="toc-level-3" href="#section-3">环境构建</a>
+                            <a class="toc-level-4" href="#code-sandbox">Code Sandbox</a>
+                            <a class="toc-level-4" href="#agentic-tool-use">Agentic Tool-Use</a>
+                            <a class="toc-level-3" href="#section-6">任务构建</a>
+                            <a class="toc-level-4" href="#agentic-search">Agentic Search</a>
+                            <a class="toc-level-4" href="#agentic-tool-use-2">Agentic Tool-Use</a>
+                            <a class="toc-level-3" href="#section-7">冷启动</a>
+                            <a class="toc-level-4" href="#general-thinking">General Thinking</a>
+                            <a class="toc-level-4" href="#agentic-coding">Agentic Coding</a>
+                            <a class="toc-level-4" href="#agentic-search-2">Agentic Search</a>
+                            <a class="toc-level-4" href="#agentic-tool-use-3">Agentic Tool-Use</a>
+                            <a class="toc-level-2" href="#agentic-rl-dora">异步 Agentic RL 框架：DORA</a>
+                            <a class="toc-level-2" href="#rl">RL 训练</a>
+                            <a class="toc-level-3" href="#rl-2">通用 RL 策略</a>
+                            <a class="toc-level-3" href="#agentic-rl">Agentic RL 策略</a>
+                            <a class="toc-level-2" href="#section-8">模型评测</a>
+                            <a class="toc-level-2" href="#section-9">总结与思考</a>
+                        </nav>
+
+                        <div class="article-info">
+                            <h2>文章信息</h2>
+                            <span>分类：LLM Alignment</span>
+                            <span>创建：2026-02-13</span>
+                            <span>更新：2026-02-25</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
+    <script src="../../assets/site.js?v=20260608-1"></script>
+</body>
+</html>
