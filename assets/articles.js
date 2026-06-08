@@ -60,5 +60,21 @@ window.SZF_ARTICLES = [
             "Reward Model",
             "Confession"
         ]
+    },
+    {
+        "title": "如何完成一次成功的对齐(1)：SFT篇",
+        "description": "梳理 SFT 阶段围绕质量、复杂性、多样性的数据自动生成与筛选策略，以及幻觉与知识一致性问题。",
+        "date": "2024-05-28",
+        "category": "LLM Alignment",
+        "readTime": "13 min read",
+        "href": "articles/successful-alignment-sft/",
+        "image": "articles/successful-alignment-sft/assets/sft-alignment-hero-generated.png",
+        "tags": [
+            "LLM",
+            "SFT",
+            "Alignment",
+            "Instruction Tuning",
+            "Data Selection"
+        ]
     }
 ];

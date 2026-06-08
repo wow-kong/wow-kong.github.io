@@ -124,6 +124,8 @@ main {
 }
 
 .article-hero {
+    position: relative;
+    overflow: hidden;
     min-height: clamp(280px, 34vh, 360px);
     background:
         linear-gradient(90deg, rgba(7, 16, 15, 0.84), rgba(7, 16, 15, 0.48) 46%, rgba(7, 16, 15, 0.12) 78%),
@@ -154,6 +156,8 @@ main {
 }
 
 .article-hero .hero-inner {
+    position: relative;
+    z-index: 1;
     width: min(100% - 64px, 920px);
     padding: 104px 0 42px;
 }
@@ -1546,6 +1550,35 @@ main {
         var(--article-hero-image, url("article-hero-forest.jpg")) center 48% / cover no-repeat;
 }
 
+.sft-alignment-article .article-hero {
+    min-height: clamp(420px, 52vh, 560px);
+    background: #0d1614;
+}
+
+.sft-alignment-article .article-hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background:
+        linear-gradient(90deg, rgba(6, 14, 13, 0.96), rgba(6, 14, 13, 0.82) 34%, rgba(6, 14, 13, 0.24) 70%),
+        linear-gradient(0deg, rgba(6, 14, 13, 0.62), rgba(6, 14, 13, 0.08) 44%);
+}
+
+.sft-alignment-article .article-hero-media {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center center;
+}
+
+.sft-alignment-article .article-hero .hero-inner {
+    z-index: 2;
+}
+
 @media (max-width: 520px) {
     .confessions-article .article-hero {
         min-height: 520px;
@@ -1553,5 +1586,21 @@ main {
             linear-gradient(90deg, rgba(7, 16, 15, 0.88), rgba(7, 16, 15, 0.58)),
             linear-gradient(0deg, rgba(7, 16, 15, 0.72), rgba(7, 16, 15, 0.12) 48%),
             var(--article-hero-image, url("article-hero-forest.jpg")) 46% center / cover no-repeat;
+    }
+}
+
+@media (max-width: 760px) {
+    .sft-alignment-article .article-hero {
+        min-height: 560px;
+    }
+
+    .sft-alignment-article .article-hero::before {
+        background:
+            linear-gradient(0deg, rgba(6, 14, 13, 0.92), rgba(6, 14, 13, 0.54) 52%, rgba(6, 14, 13, 0.88)),
+            linear-gradient(90deg, rgba(6, 14, 13, 0.82), rgba(6, 14, 13, 0.18));
+    }
+
+    .sft-alignment-article .article-hero .hero-inner {
+        padding-top: 184px;
     }
 }
