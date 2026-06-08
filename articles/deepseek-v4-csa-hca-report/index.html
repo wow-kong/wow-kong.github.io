@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="系统梳理 DeepSeek-V4 中 CSA/HCA 的压缩、检索、滑动窗口与位置编码设计，以及它们在百万 token 上下文下的效率权衡。">
+    <title>DeepSeek-V4 中的 CSA/HCA 注意力机制解读 | Sun Zhifei</title>
+    <link rel="stylesheet" href="../../assets/site.css?v=20260608-2">
+    <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["\\(", "\\)"], ["$", "$"]],
+                displayMath: [["\\[", "\\]"], ["$$", "$$"]]
+            },
+            options: {
+                skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+            }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body class="deepseek-attention-article" data-site-root="../../" data-active-section="articles">
+    <header class="site-header" data-site-header></header>
+
+    <main>
+        <article>
+            <section class="article-hero" aria-label="文章标题区" style="--article-hero-image: url(&quot;../articles/deepseek-v4-csa-hca-report/assets/deepseek-v4-csa-hca-hero.jpg&quot;)">
+                <div class="hero-inner">
+                    <p class="eyebrow">Technical Notes · LLM Systems</p>
+                    <h1>DeepSeek-V4 中的 CSA/HCA 注意力机制解读</h1>
+                    <p class="hero-copy">系统梳理 DeepSeek-V4 中 CSA/HCA 的压缩、检索、滑动窗口与位置编码设计，以及它们在百万 token 上下文下的效率权衡。</p>
+                    <div class="article-meta" aria-label="文章元信息">
+                        <span>2026-05-20</span>
+                        <span>LLM Systems</span>
+                        <span>18 min read</span>
+                    </div>
+                    <div class="tags" aria-label="文章标签">
+                        <span>LLM</span>
+                        <span>DeepSeek</span>
+                        <span>Attention</span>
+                        <span>KV Cache</span>
+                        <span>Long Context</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="article-shell">
+                <div class="container article-layout">
+                    <div class="article-content">
+<p class="article-lead">面向对外分享/技术汇报的整理版。核心主题：DeepSeek-V4 如何用 <strong>CSA（Compressed Sparse Attention）</strong> 和 <strong>HCA（Heavily Compressed Attention）</strong> 在 1M token 上下文下压低 attention 计算量与 KV cache 成本。</p>
+<p>这篇笔记重点放在机制拆解和工程权衡上：先区分“写 cache”和“读 cache”，再分别展开 CSA、HCA、sliding window、RoPE 与 MLA-like 结构之间的关系。文中涉及配置数值、公式和实现细节的地方，均沿用原始技术资料中的表述。</p>
+<h3 id="section-1">摘要</h3>
+<p>DeepSeek-V4 的 CSA/HCA 可以理解为：</p>
+<blockquote>
+<p><strong>不要让每个新 token 都翻完整历史原文；先把历史 KV cache 压成“摘要卡片”，再让当前 query token 去读这些卡片。</strong></p>
+</blockquote>
+<p>其中：</p>
+<ul>
+  <li><p><strong>CSA</strong>：小块压缩，通常每 <code>m=4</code> 个 token 压成 1 个 compressed KV entry；然后用 indexer 选 top-k 压缩块做 attention。</p></li>
+  <li><p><strong>HCA</strong>：大块压缩，通常每 <code>m'=128</code> 个 token 压成 1 个 compressed KV entry；压缩得很狠，所以压缩后可以 dense attention 全部看。</p></li>
+  <li><p><strong>Sliding window</strong>：最近一小段 token 不压缩，保留原始 KV，用来弥补局部细节和因果性问题。</p></li>
+</ul>
+<p>官方技术报告称，DeepSeek-V4 使用 CSA/HCA 混合注意力来提升长上下文效率；在 1M-token 场景下，V4-Pro 相比 V3.2 只需要约 27% single-token inference FLOPs 和 10% KV cache。<sup class="footnote-ref" id="fnref-report-eff"><a href="#fn-report-eff">1</a></sup></p>
+<h3 id="1-full-attention">1. 为什么要这么做：full attention 太贵</h3>
+<p>普通自回归 Transformer 在生成当前 token 时，需要用当前 query 去和历史所有 key/value 交互：</p>
+<pre><code class="language-text">当前 query token
+    ↓
+和过去所有 token 的 K/V 做 attention</code></pre>
+<p>如果上下文长度达到 1M token，问题会非常直接：</p>
+<ol>
+  <li><p><strong>KV cache 线性膨胀</strong>：每个历史 token 都要保存 K/V。</p></li>
+  <li><p><strong>单 token 解码计算变重</strong>：每生成一个 token，都要和大量历史 K/V 计算 attention score。</p></li>
+  <li><p><strong>长程任务越来越依赖超长上下文</strong>：agent、跨文档分析、长链推理都会把上下文拉得很长。</p></li>
+</ol>
+<p>DeepSeek-V4 的办法是：</p>
+<pre><code class="language-text">历史 token 原始 KV
+    ↓
+压缩成更少的 compressed KV entries
+    ↓
+当前 query 只和这些 compressed entries + 最近窗口原始 KV 交互</code></pre>
+<h3 id="2-cache-cache">2. 先分清两件事：写 cache 和读 cache</h3>
+<p>理解 CSA/HCA 最重要的是把过程拆成两步。</p>
+<h4 id="2-1-cache-kv">2.1 写 cache：历史 KV 怎么被压缩</h4>
+<p>对某一层来说，历史 token 的 hidden states 是：</p>
+<div class="math math-display">\[
+H = [h_1, h_2, \dots, h_n]
+\]</div>
+<p>压缩阶段主要使用这些 <strong>KV token 自己的 hidden state</strong> 生成：</p>
+<pre><code class="language-text">KV 内容 C：这个 token 要贡献什么信息
+compression score Z：这个 token 在块内有多重要</code></pre>
+<p>这一阶段一般不看当前 decoding query token。也就是说，某个历史块压成什么样，基本在写入 compressed cache 时就定了。</p>
+<h4 id="2-2-cache-query">2.2 读 cache：当前 query 怎么读取压缩历史</h4>
+<p>当前 token 来了之后，会产生 query，然后：</p>
+<ul>
+  <li><p>在 <strong>CSA</strong> 中：先通过 Lightning Indexer 给 compressed blocks 打分，选 top-k；再对 top-k compressed KV 做 attention。</p></li>
+  <li><p>在 <strong>HCA</strong> 中：不做 top-k，直接对所有 heavily compressed KV 做 dense attention。</p></li>
+  <li><p>同时，当前 query 还会看最近 <code>n_win</code> 个未压缩的原始 KV entries。</p></li>
+</ul>
+<p>因此可以概括为：</p>
+<pre><code class="language-text">压缩阶段：query-independent
+读取阶段：query-dependent</code></pre>
+<p>这也是 CSA/HCA 的根本 trade-off：牺牲一部分 token-level per-query 精细选择能力，换取超长上下文下可缓存、可复用、可承受的推理成本。</p>
+<h3 id="3-csa">3. CSA：小块压缩 + 稀疏选块</h3>
+<p>CSA 全称 <strong>Compressed Sparse Attention</strong>。它的流程是：</p>
+<pre><code class="language-text">历史 KV token
+    ↓
+每 m 个 token 压成 1 个 compressed KV entry
+    ↓
+当前 query 用 Lightning Indexer 选 top-k compressed entries
+    ↓
+当前 query 对这些 selected compressed entries 做 attention
+    ↓
+再加上最近 sliding window 的原始 KV</code></pre>
+<p>DeepSeek-V4 中 CSA 的压缩率设置为：</p>
+<div class="math math-display">\[
+m = 4
+\]</div>
+<p>即大致每 4 个 token 压成 1 个 compressed KV entry；V4-Flash 的 CSA attention top-k 是 512，V4-Pro 的 CSA attention top-k 是 1024。<sup class="footnote-ref" id="fnref-report-config"><a href="#fn-report-config">2</a></sup></p>
+<h3 id="4-compression-weights">4. compression weights 怎么生成</h3>
+<p>以 CSA 为例。模型从 hidden states <code>H</code> 生成两类东西：</p>
+<div class="math math-display">\[
+C = H W^{KV}
+\]</div>
+<div class="math math-display">\[
+Z = H W^Z
+\]</div>
+<p>其中：</p>
+<ul>
+  <li><p><code>C</code> 是每个 token 的 KV 内容。</p></li>
+  <li><p><code>Z</code> 是每个 token 的 compression score。</p></li>
+  <li><p><code>W^{KV}</code> 和 <code>W^Z</code> 都是可学习参数。</p></li>
+</ul>
+<p>随后在一个 block 内加入可学习的块内位置 bias <code>B</code>：</p>
+<div class="math math-display">\[
+S = \operatorname{Softmax}_{block}(Z + B)
+\]</div>
+<p>然后做加权池化：</p>
+<div class="math math-display">\[
+C_i^{Comp} = \sum_{j \in block_i} S_j \odot C_j
+\]</div>
+<p>直观上就是：</p>
+<pre><code class="language-text">token:    A      B      C      D
+score:   0.2    2.1    0.5    1.0
+softmax: 0.08   0.54   0.11   0.27
+
+compressed entry = 0.08*A + 0.54*B + 0.11*C + 0.27*D</code></pre>
+<p>但要注意，DeepSeek-V4 里的 score/weight 是 channel-wise 的，也就是每个 token 在每个维度上都可以有不同权重，而不是“一个 token 一个标量权重”。参考实现里 <code>wkv</code> 生成 KV 内容，<code>wgate</code> 生成 score，再用 softmax 后加权求和；代码注释称其为 learned gated pooling。<sup class="footnote-ref" id="fnref-code-compressor"><a href="#fn-code-compressor">3</a></sup></p>
+<h3 id="5-csa-a-b-overlap">5. CSA 为什么是两路压缩：<code>a/b</code> 两路 + overlap</h3>
+<p>CSA 不是简单地每 4 个 token 独立压成一个 entry。它有两路：</p>
+<div class="math math-display">\[
+C^a = H W^{KV}_a, \quad C^b = H W^{KV}_b
+\]</div>
+<div class="math math-display">\[
+Z^a = H W^Z_a, \quad Z^b = H W^Z_b
+\]</div>
+<p>对第 <code>i</code> 个 compressed entry，CSA 会把：</p>
+<pre><code class="language-text">当前 block:   [mi, ..., m(i+1)-1]        用 a 路
+前一个 block: [m(i-1), ..., mi-1]        用 b 路</code></pre>
+<p>拼起来，在总共 <code>2m</code> 个位置上做同一个 softmax，然后加权求和。官方公式中也说明 softmax 是在来自 <code>Z^a</code> 与 <code>Z^b</code> 的总计 <code>2m</code> 个元素上归一化。<sup class="footnote-ref" id="fnref-report-csa-formula"><a href="#fn-report-csa-formula">4</a></sup></p>
+<p>用 <code>m=4</code> 举例：</p>
+<pre><code class="language-text">block0: [0,1,2,3]
+block1: [4,5,6,7]
+block2: [8,9,10,11]
+
+CSA entry0 ≈ compress(block0)
+CSA entry1 ≈ compress(block0 as previous + block1 as current)
+CSA entry2 ≈ compress(block1 as previous + block2 as current)</code></pre>
+<p>这里的重点是：</p>
+<ul>
+  <li><p>每个 compressed entry 实际参考 <code>2m</code> 个 KV entries。</p></li>
+  <li><p>相邻 compressed entries 的来源有重叠。</p></li>
+  <li><p>但由于步长仍然是 <code>m</code>，所以整体序列长度仍然压到原来的 <code>1/m</code>，而不是 <code>1/(2m)</code>。<sup class="footnote-ref" id="fnref-report-overlap"><a href="#fn-report-overlap">5</a></sup></p></li>
+</ul>
+<h4 id="section-2">为什么需要两路？</h4>
+<p>可以理解为：同一个 token 在两个相邻压缩 entry 中扮演的角色不同。</p>
+<pre><code class="language-text">当它是“当前块主体信息”时，用 a 路表示。
+当它是“给下一个块补边界上下文”时，用 b 路表示。</code></pre>
+<p>这不是两个 attention head，而是为 overlap compression 服务的 role-specific projection。</p>
+<h3 id="6-csa-lightning-indexer-query-dependent">6. CSA 的 Lightning Indexer：压缩后再 query-dependent 选块</h3>
+<p>压缩之后，CSA 并不会让当前 query 看所有 compressed entries，而是先做稀疏选择。</p>
+<p>流程如下：</p>
+<pre><code class="language-text">当前 query token h_t
+    ↓
+低秩投影得到 indexer query q^I_t
+    ↓
+与 compressed indexer keys 计算 index score
+    ↓
+取 top-k compressed entries
+    ↓
+真正 attention 只在这些 entries 上做</code></pre>
+<p>公式上，index score 类似：</p>
+<div class="math math-display">\[
+I_{t,s} = \sum_h w^I_{t,h} \cdot \operatorname{ReLU}(q^I_{t,h} \cdot K^{IComp}_s)
+\]</div>
+<p>其中：</p>
+<ul>
+  <li><p><code>t</code> 是当前 query token。</p></li>
+  <li><p><code>s</code> 是历史 compressed block。</p></li>
+  <li><p><code>h</code> 是 indexer head。</p></li>
+  <li><p>ReLU 会把某个 head 的负相关贡献截断为 0。</p></li>
+</ul>
+<p>然后：</p>
+<div class="math math-display">\[
+\mathcal{C}^{SprsComp}_t = \operatorname{TopK}(I_{t,:})
+\]</div>
+<h4 id="relu-top-k-k">ReLU 会不会导致 top-k 不满 K 个？</h4>
+<p>一般不会。因为这里不是“只选 score &gt; 0 的 block”，而是“对合法 compressed blocks 排序后取 top-k”。参考实现中也是 <code>relu_()</code> 后直接调用 <code>topk(min(index_topk, end_pos // ratio))</code>。<sup class="footnote-ref" id="fnref-code-indexer"><a href="#fn-code-indexer">6</a></sup></p>
+<p>因此：</p>
+<pre><code class="language-text">所有分数都是 0，也仍然可以取 top-k。</code></pre>
+<p>真正导致有效数量小于 K 的情况主要是：</p>
+<ol>
+  <li><p>历史 compressed block 本来就不足 K 个。</p></li>
+  <li><p>因果 mask 后，对靠前 token 来说可看的 preceding compressed blocks 数量不足，甚至为 0。</p></li>
+</ol>
+<p>这时仍然还有 sliding window 的原始 KV 可用。</p>
+<h3 id="7-hca">7. HCA：压得更狠，但压缩后全看</h3>
+<p>HCA 全称 <strong>Heavily Compressed Attention</strong>。它和 CSA 的核心区别是：</p>
+<pre><code class="language-text">CSA：压缩得比较轻，然后 top-k 选块
+HCA：压缩得非常狠，然后 dense attention 全部看</code></pre>
+<p>HCA 的压缩方式类似 CSA，但更简单：</p>
+<div class="math math-display">\[
+C = H W^{KV}
+\]</div>
+<div class="math math-display">\[
+Z = H W^Z
+\]</div>
+<div class="math math-display">\[
+S = \operatorname{Softmax}_{block}(Z + B)
+\]</div>
+<div class="math math-display">\[
+C_i^{Comp} = \sum_{j=m'i}^{m'(i+1)-1} S_j \odot C_j
+\]</div>
+<p>DeepSeek-V4 中 HCA 使用：</p>
+<div class="math math-display">\[
+m' = 128
+\]</div>
+<p>即大致每 128 个 token 压成 1 个 compressed KV entry。官方报告明确说，HCA 使用更大的压缩率 <code>m' &gt;&gt; m</code>，且不做 overlapped compression；压缩后执行 shared-KV MQA/dense attention。<sup class="footnote-ref" id="fnref-report-hca"><a href="#fn-report-hca">7</a></sup></p>
+<h3 id="8-overlap-hca-overlap">8. 既然 overlap 很重要，为什么 HCA 不做 overlap？</h3>
+<p>官方报告只给出事实：<strong>HCA 不做 overlapped compression</strong>。为什么这么设计，可以从工程定位上理解：</p>
+<h4 id="8-1-hca">8.1 HCA 的目标不是边界细节，而是全局低分辨率视野</h4>
+<p>HCA 每 128 个 token 压成 1 个 entry，本来就是粗粒度全局记忆。它不负责精确保留每个边界附近的细节；细节主要交给 CSA 和 sliding window。</p>
+<h4 id="8-2-hca-dense-attention">8.2 HCA 压缩后 dense attention，天然能看相邻块</h4>
+<p>CSA 有 top-k 选择，可能漏选边界另一侧的块，所以 overlap 对 CSA 更重要。</p>
+<p>HCA 压缩后对所有 compressed entries 做 dense attention，边界两侧的相邻 compressed entries 都在候选集合里。它仍然会丢失 128-to-1 压缩带来的细节，但不太存在“top-k 选漏相邻块”的问题。</p>
+<h4 id="8-3-hca-2m-overlap">8.3 给 HCA 加 2m' overlap 成本不划算</h4>
+<p>如果 HCA 也做 <code>2m'</code> overlap，那么每个 compressed entry 要从 256 个 token 里做 gated pooling，成本和复杂度都会上升。HCA 的核心价值是极致降低长程全局 memory 成本，因此没有采用 overlap 是合理的工程折中。</p>
+<blockquote>
+<p>这部分是基于结构的推断；报告本身只明确说明 HCA 不做 overlap。</p>
+</blockquote>
+<h3 id="9-sliding-window-token-kv">9. Sliding window：最近 token 保留原始 KV</h3>
+<p>CSA/HCA 都会额外加入一段 <strong>sliding window uncompressed KV</strong>。官方报告解释：为了严格保持因果性，每个 query 只能看 preceding compressed KV blocks；因此 query 无法访问自己所在压缩块内的其他 token，而最近 token 通常又更相关，所以额外引入最近 <code>n_win</code> 个未压缩 KV entries。<sup class="footnote-ref" id="fnref-report-window"><a href="#fn-report-window">8</a></sup></p>
+<p>直观例子：</p>
+<pre><code class="language-text">m = 4
+block0: token 0,1,2,3 → compressed0
+block1: token 4,5,6,7 → compressed1</code></pre>
+<p>如果当前正在处理 token 6，那么它不能看 <code>compressed1</code>，因为 <code>compressed1</code> 包含 token 7，属于未来信息。</p>
+<p>所以当前 token 的候选 KV 大概是：</p>
+<pre><code class="language-text">远处历史：preceding compressed KV blocks
+近处历史：最近 n_win 个原始 KV entries</code></pre>
+<p>DeepSeek-V4 的配置中，sliding window size 是：</p>
+<div class="math math-display">\[
+n_{win} = 128
+\]</div>
+<p>这就是为什么我们可以把它理解成：</p>
+<pre><code class="language-text">远古上下文看摘要，最近上下文看原文。</code></pre>
+<h3 id="10">10. 语义边界问题：如果“一百一十万元”被切坏怎么办？</h3>
+<p>这个问题无法被完全消除。CSA/HCA 是固定 token 数分块，不是基于语义边界分块，所以它确实可能把一个完整语义单元切开。</p>
+<p>但它有几层缓解机制。</p>
+<h4 id="10-1-csa-overlap">10.1 CSA overlap 缓解边界切分</h4>
+<p>如果金额被切成：</p>
+<pre><code class="language-text">block A: ... 一百一
+block B: 十万元 ...</code></pre>
+<p>没有 overlap 时，两个块各自压缩，语义可能断开。</p>
+<p>CSA 的 overlap 让某个 compressed entry 同时参考前一个 block 和当前 block：</p>
+<pre><code class="language-text">CSA entry B ≈ compress(block A + block B)</code></pre>
+<p>因此跨边界短语有机会完整出现在某个 compressed entry 的输入范围内。</p>
+<h4 id="10-2-query-compressed-entries">10.2 query 可以同时看多个 compressed entries</h4>
+<p>CSA 的 top-k 不是只选一个块，而是选一组 compressed entries；HCA 则直接看全部 compressed entries。因此边界两侧的信息可能被同时读取。</p>
+<h4 id="10-3-128-token-kv">10.3 最近 128 token 直接看原始 KV</h4>
+<p>如果关键信息出现在最近窗口内，它不会只依赖压缩表示，而是以原始 KV 形式参与 attention。</p>
+<h4 id="10-4-channel-wise-compression">10.4 channel-wise compression 比简单平均更强</h4>
+<p>compression weight 是按维度生成的，不是一个 token 一个标量。这意味着一个 compressed vector 的不同维度可以偏向不同 token，从而在高维空间中保留更多混合信息。</p>
+<h4 id="10-5">10.5 但它不是无损压缩</h4>
+<p>必须诚实地说：</p>
+<blockquote>
+<p>CSA/HCA 不是 full attention 的等价变换，也不是无损压缩。远处精确信息如果只经过重压缩，确实可能丢失细节。</p>
+</blockquote>
+<p>它的设计目标不是“零损失”，而是：</p>
+<pre><code class="language-text">用可接受的信息损失，换取 1M 级上下文下可承受的计算和缓存成本。</code></pre>
+<h3 id="11-query-independent">11. query-independent 压缩的表达力损失</h3>
+<p>在 full attention 中，每个 query 都可以对同一组历史 token 重新分配注意力：</p>
+<div class="math math-display">\[
+\alpha_{t,j} = \operatorname{softmax}(q_t^\top k_j)
+\]</div>
+<p>即：</p>
+<pre><code class="language-text">query1 可以重点看 token A
+query2 可以重点看 token B</code></pre>
+<p>而 CSA/HCA 的压缩阶段是：</p>
+<div class="math math-display">\[
+\tilde C_i = \sum_{j \in block_i} S_{i,j} C_j
+\]</div>
+<p>其中 <code>S_{i,j}</code> 由历史 token 的 hidden state 和 block 内 bias 生成，不依赖未来某个 query。</p>
+<p>之后当前 query 只能对 compressed entries 做 attention：</p>
+<div class="math math-display">\[
+o_t = \sum_i \beta_{t,i} \tilde C_i
+\]</div>
+<p>展开：</p>
+<div class="math math-display">\[
+o_t = \sum_i \sum_{j \in block_i} \beta_{t,i} S_{i,j} C_j
+\]</div>
+<p>可以看到：</p>
+<ul>
+  <li><p><code>\beta_{t,i}</code> 是 query-dependent 的 block-level attention。</p></li>
+  <li><p><code>S_{i,j}</code> 是 query-independent 的 block-internal compression weight。</p></li>
+</ul>
+<p>因此，CSA/HCA 不能完全保留 full attention 中“每个 query 对 block 内每个 token 重新加权”的能力。</p>
+<p>为什么还这么做？因为这样 compressed KV entry 可以缓存和复用。如果压缩权重也依赖当前 query，就几乎要对每个新 token 重新压缩历史，成本会重新接近 full attention。</p>
+<h3 id="12-learned-bias-rope">12. 位置编码：块内 learned bias 与全局 RoPE 是两套东西</h3>
+<p>这里最容易混淆。</p>
+<h4 id="12-1-compression-bias">12.1 compression bias 是块内相对位置，不是全局位置表</h4>
+<p>CSA/HCA 的 <code>B</code> 是 block 内位置 bias：</p>
+<pre><code class="language-text">block 内第 0 个 token 的 bias
+block 内第 1 个 token 的 bias
+...
+block 内第 m-1 个 token 的 bias</code></pre>
+<p>它会在每个 block 中重复使用。</p>
+<p>因此它不需要知道当前 token 是全文第 100 个、10 万个还是 100 万个。它只负责告诉 compressor：</p>
+<pre><code class="language-text">这个 token 在当前压缩块里的相对 offset 是多少。</code></pre>
+<p>参考实现中 <code>ape</code> 的形状是 <code>compress_ratio × head_dim</code>，overlap 时有两份维度；这说明它是按压缩块内部长度学习的，而不是全局绝对位置表。<sup class="footnote-ref" id="fnref-code-ape"><a href="#fn-code-ape">9</a></sup></p>
+<h4 id="12-2-rope">12.2 全局位置由 RoPE 负责</h4>
+<p>DeepSeek-V4 对 CSA/HCA 中的 query、KV entry 和 core attention output 使用 partial RoPE：只在最后 64 维应用 RoPE。因为 compressed KV entry 同时作为 key 和 value，attention output 还会在最后 64 维应用 query 位置的反向 RoPE，使输出更偏相对位置信息。<sup class="footnote-ref" id="fnref-report-rope"><a href="#fn-report-rope">10</a></sup></p>
+<p>参考实现中的顺序大致是：</p>
+<pre><code class="language-text">先压缩 KV
+    ↓
+得到 compressed KV entry
+    ↓
+对 compressed KV entry 的 RoPE 维度加 RoPE</code></pre>
+<p>即 RoPE 不是在 compression score 上做，而是在最终用于 attention 的 q/KV entry 上做。</p>
+<h4 id="12-3-compressed-kv">12.3 compressed KV 用哪个位置？</h4>
+<p>从参考实现看，compressed KV 的 RoPE 位置大致使用 block 起始位置：</p>
+<pre><code class="language-text">CSA ratio=4:
+block [0,1,2,3]       → position 0
+block [4,5,6,7]       → position 4
+block [8,9,10,11]     → position 8
+
+HCA ratio=128:
+block [0,...,127]     → position 0
+block [128,...,255]   → position 128</code></pre>
+<p>代码中 prefill 使用 <code>freqs_cis[:cutoff:ratio]</code>，decode 使用 <code>freqs_cis[start_pos + 1 - compress_ratio]</code>，对应的正是块起始位置。<sup class="footnote-ref" id="fnref-code-rope-pos"><a href="#fn-code-rope-pos">11</a></sup></p>
+<h4 id="12-4">12.4 长度外推怎么做？</h4>
+<p>块内 learned bias 本身不负责长度外推，因为它不是全局 position embedding table，而是可重复使用的局部模板。</p>
+<p>全局距离和长上下文位置主要依赖：</p>
+<pre><code class="language-text">query/KV 上的 RoPE
++ 训练中逐步扩展到长序列
++ 参考实现中对压缩层 RoPE 的 scaling 支持</code></pre>
+<p>所以更准确的说法是：</p>
+<blockquote>
+<p>learned block bias 不阻碍长度外推；它只处理 block 内相对位置。真正的全局位置关系由 RoPE 处理。</p>
+</blockquote>
+<h3 id="13-q-rope-mla-like">13. 低秩 Q 投影、RoPE 和 MLA-like 结构</h3>
+<p>HCA/CSA 的 query 生成采用低秩投影：</p>
+<div class="math math-display">\[
+c_t^Q = h_t W^{DQ}
+\]</div>
+<div class="math math-display">\[
+q_t = c_t^Q W^{UQ}
+\]</div>
+<p>数学上，如果中间没有非线性或归一化，确实可以把两个矩阵合并：</p>
+<div class="math math-display">\[
+h_t W^{DQ} W^{UQ} = h_t W^Q
+\]</div>
+<p>但实际这么写有几个原因：</p>
+<ol>
+  <li><p><strong>低秩省参数/计算</strong>：<code>d → d_c → n_h c</code> 比直接 <code>d → n_h c</code> 更省。</p></li>
+  <li><p><strong>中间有 RMSNorm</strong>：参考实现是 <code>wq_a -&gt; q_norm -&gt; wq_b</code>，严格来说不能合并成单个线性层。</p></li>
+  <li><p><strong>中间 latent 可复用</strong>：CSA 的 indexer query 和 core attention query 都可以从同一个 query latent 派生。</p></li>
+</ol>
+<p>RoPE 加在哪里？</p>
+<pre><code class="language-text">h_t
+  ↓ W_DQ
+c_t^Q             # 低秩 latent，不加 RoPE
+  ↓ W_UQ
+q_t per head      # 形成 head_dim 后
+  ↓
+对最后 64 维加 RoPE</code></pre>
+<p>参考实现中 Attention 类注释写的是 “MLA with sliding window + optional KV compression”，并且确实有 <code>wq_a -&gt; q_norm -&gt; wq_b</code> 以及 grouped low-rank output projection。<sup class="footnote-ref" id="fnref-code-mla"><a href="#fn-code-mla">12</a></sup></p>
+<p>但这不等于 DeepSeek-V4 仍然完全使用 DeepSeek-V3 那种以 <strong>KV latent cache</strong> 为核心的 MLA。更准确的表述是：</p>
+<pre><code class="language-text">DeepSeek-V4 = MLA-like attention backbone
+            + shared-KV/MQA 风格
+            + sliding window 原始 KV
+            + CSA/HCA 的序列维 KV 压缩</code></pre>
+<p>也就是说：</p>
+<ul>
+  <li><p>V4 里有 MLA-like 的低秩 Q/O 投影结构。</p></li>
+  <li><p>V4 的长上下文 KV cache 节省主要靠 CSA/HCA 沿序列维压缩 KV entries。</p></li>
+  <li><p>它不是简单的 “V3 MLA + CSA/HCA 叠加”。</p></li>
+</ul>
+<h3 id="14-csa-hca">14. CSA 和 HCA 的对照表</h3>
+<table>
+  <thead>
+    <tr>
+      <th>维度</th>
+      <th>CSA</th>
+      <th>HCA</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>全称</td>
+      <td>Compressed Sparse Attention</td>
+      <td>Heavily Compressed Attention</td>
+    </tr>
+    <tr>
+      <td>压缩率</td>
+      <td><code>m=4</code></td>
+      <td><code>m'=128</code></td>
+    </tr>
+    <tr>
+      <td>压缩粒度</td>
+      <td>小块，细一些</td>
+      <td>大块，粗很多</td>
+    </tr>
+    <tr>
+      <td>是否 overlap</td>
+      <td>是</td>
+      <td>否</td>
+    </tr>
+    <tr>
+      <td>压缩后是否 top-k</td>
+      <td>是，用 Lightning Indexer</td>
+      <td>否，dense attention 全部看</td>
+    </tr>
+    <tr>
+      <td>query 何时参与</td>
+      <td>压缩后：选块 + attention</td>
+      <td>压缩后：attention</td>
+    </tr>
+    <tr>
+      <td>适合承担</td>
+      <td>较细粒度远程检索</td>
+      <td>粗粒度全局视野</td>
+    </tr>
+    <tr>
+      <td>是否有 sliding window</td>
+      <td>有，最近 <code>n_win=128</code> 原始 KV</td>
+      <td>有，最近 <code>n_win=128</code> 原始 KV</td>
+    </tr>
+    <tr>
+      <td>主要风险</td>
+      <td>top-k 可能漏掉相关块；压缩非无损</td>
+      <td>128-to-1 压缩可能丢细节</td>
+    </tr>
+  </tbody>
+</table>
+<h3 id="15-deepseek-v4">15. DeepSeek-V4 关键配置</h3>
+<table>
+  <thead>
+    <tr>
+      <th>项目</th>
+      <th>DeepSeek-V4-Flash</th>
+      <th>DeepSeek-V4-Pro</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Transformer 层数</td>
+      <td>43</td>
+      <td>61</td>
+    </tr>
+    <tr>
+      <td>总参数 / 激活参数</td>
+      <td>284B / 13B</td>
+      <td>1.6T / 49B</td>
+    </tr>
+    <tr>
+      <td>前几层设置</td>
+      <td>前 2 层 pure sliding window</td>
+      <td>前 2 层 HCA</td>
+    </tr>
+    <tr>
+      <td>后续层</td>
+      <td>CSA/HCA interleaved</td>
+      <td>CSA/HCA interleaved</td>
+    </tr>
+    <tr>
+      <td>CSA 压缩率</td>
+      <td><code>m=4</code></td>
+      <td><code>m=4</code></td>
+    </tr>
+    <tr>
+      <td>CSA top-k</td>
+      <td>512</td>
+      <td>1024</td>
+    </tr>
+    <tr>
+      <td>HCA 压缩率</td>
+      <td><code>m'=128</code></td>
+      <td><code>m'=128</code></td>
+    </tr>
+    <tr>
+      <td>sliding window</td>
+      <td><code>n_win=128</code></td>
+      <td><code>n_win=128</code></td>
+    </tr>
+    <tr>
+      <td>query compression dim</td>
+      <td>1024</td>
+      <td>1536</td>
+    </tr>
+  </tbody>
+</table>
+<p>配置来自官方技术报告的 model setups 部分。<sup class="footnote-ref" id="fnref-report-config-2"><a href="#fn-report-config">2</a></sup></p>
+<h3 id="16">16. 伪代码版：怎么实现</h3>
+<h4 id="16-1-csa-cache">16.1 CSA 写 cache</h4>
+<pre><code class="language-python"># H: historical hidden states
+
+# 1. 生成两路 KV 内容和 compression score
+C_a = H @ W_KV_a
+C_b = H @ W_KV_b
+Z_a = H @ W_Z_a
+Z_b = H @ W_Z_b
+
+# 2. 对每个 block 做 overlap compression
+for i in range(num_blocks):
+    current = block(i)      # [mi, ..., m(i+1)-1]
+    previous = block(i - 1) # [m(i-1), ..., mi-1]
+
+    score = concat(Z_a[current] + B_a,
+                   Z_b[previous] + B_b)
+
+    weight = softmax(score, dim=&quot;within_2m_window&quot;)
+
+    compressed[i] = weighted_sum(
+        concat(C_a[current], C_b[previous]),
+        weight
+    )</code></pre>
+<h4 id="16-2-csa-cache">16.2 CSA 读 cache</h4>
+<pre><code class="language-python"># current token hidden state: h_t
+
+# 1. 生成 query latent
+c_q = h_t @ W_DQ
+
+# 2. indexer 选 compressed blocks
+q_index = c_q @ W_IUQ
+scores = relu(q_index @ compressed_index_keys.T)
+selected = topk(scores, k)
+
+# 3. 生成真正 attention query
+q = c_q @ W_UQ
+
+# 4. 拼接最近原始 KV 和 selected compressed KV
+kv_candidates = concat(recent_raw_kv, compressed[selected])
+
+# 5. 做 attention
+out = attention(q, key=kv_candidates, value=kv_candidates)</code></pre>
+<h4 id="16-3-hca">16.3 HCA</h4>
+<pre><code class="language-python"># 1. 每 128 个 token 压成 1 个 entry，不 overlap
+C = H @ W_KV
+Z = H @ W_Z
+
+for i in range(num_hca_blocks):
+    block = tokens[128*i : 128*(i+1)]
+    weight = softmax(Z[block] + B)
+    compressed[i] = weighted_sum(C[block], weight)
+
+# 2. 当前 query dense attention 所有 compressed entries
+q = low_rank_query_projection(h_t)
+kv_candidates = concat(recent_raw_kv, compressed)
+out = attention(q, key=kv_candidates, value=kv_candidates)</code></pre>
+<h3 id="17">17. 对外分享时最推荐讲的比喻</h3>
+<p>可以把 1M token 上下文想成一本超长书。</p>
+<p>普通 attention：</p>
+<pre><code class="language-text">每回答一个问题，都把整本书逐字翻一遍。</code></pre>
+<p>CSA：</p>
+<pre><code class="language-text">每 4 个 token 做一张小摘要卡；
+当前问题先搜索相关卡片；
+只精读 top-k 张卡片。</code></pre>
+<p>HCA：</p>
+<pre><code class="language-text">每 128 个 token 做一张大摘要卡；
+卡片数量已经很少，所以全部扫一遍。</code></pre>
+<p>Sliding window：</p>
+<pre><code class="language-text">刚刚说过的话不看摘要，直接看原文。</code></pre>
+<h3 id="18-takeaways">18. 最终 takeaways</h3>
+<ol>
+  <li><p><strong>CSA/HCA 的本质是 sequence-level KV cache compression</strong>：不是减少 head，也不是普通剪枝，而是把历史 KV entries 沿序列维压短。</p></li>
+  <li><p><strong>compression weights 是 query-independent 的</strong>：由历史 token 的 hidden states 和块内 learned bias 生成，不会为每个未来 query 重新分配块内 token 权重。</p></li>
+  <li><p><strong>当前 query 不是不参与，而是后参与</strong>：CSA 中 query 参与 top-k 选块和 core attention；HCA 中 query 参与 dense attention。</p></li>
+  <li><p><strong>CSA 有 overlap，HCA 没有 overlap</strong>：CSA 负责较细远程检索，HCA 负责粗粒度全局视野。</p></li>
+  <li><p><strong>sliding window 是关键补丁</strong>：最近 128 token 保留原始 KV，既保持局部细节，也避免 query 因因果性无法访问自己所在压缩块的问题。</p></li>
+  <li><p><strong>块内 learned bias 不影响长度外推的主要逻辑</strong>：它是局部 offset 模板；全局位置关系由 RoPE 负责。</p></li>
+  <li><p><strong>V4 有 MLA-like 成分，但主角是 CSA/HCA</strong>：低秩 Q/O 投影类似 MLA skeleton，但长上下文 KV cache 节省主要来自序列维压缩。</p></li>
+  <li><p><strong>这不是无损压缩</strong>：边界切分、远处精确信息和 query-dependent token-level selection 都存在表达力损失；DeepSeek-V4 用 overlap、channel-wise pooling、sliding window、top-k/dense hybrid 和多层交错来做工程折中。</p></li>
+</ol>
+<h3 id="references">参考资料</h3>
+<ol class="article-footnotes">
+  <li id="fn-report-eff"><p>DeepSeek-AI, <em>DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</em>, Technical Report. 相关内容包括：1M context、CSA/HCA hybrid attention、V4-Pro 相比 V3.2 的 FLOPs 与 KV cache 对比。 <a class="footnote-backref" href="#fnref-report-eff" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-config"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 4.2.1: V4-Flash/V4-Pro 的层数、CSA/HCA interleaving、m=4、m'=128、top-k、n_win 等配置。 <a class="footnote-backref" href="#fnref-report-config" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-code-compressor"><p>DeepSeek-AI, DeepSeek-V4-Pro reference implementation, <code>inference/model.py</code>, <code>Compressor</code>: <code>wkv</code> 生成 KV 内容，<code>wgate</code> 生成 compression score，softmax 后加权求和。 <a class="footnote-backref" href="#fnref-code-compressor" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-csa-formula"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 2.3.1, formulas (9)–(12): CSA 的两路 KV/score、compression weights、learnable positional biases 与 2m softmax。 <a class="footnote-backref" href="#fnref-report-csa-formula" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-overlap"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 2.3.1: 每个 CSA compressed entry 来自 2m 个 KV entries，但相邻 entry 有 overlap，因此序列长度实际压到 1/m。 <a class="footnote-backref" href="#fnref-report-overlap" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-code-indexer"><p>DeepSeek-AI, DeepSeek-V4-Pro reference implementation, <code>inference/model.py</code>, <code>Indexer</code>: index score 经 ReLU 后直接 top-k，且 top-k 数量受合法 compressed block 数限制。 <a class="footnote-backref" href="#fnref-code-indexer" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-hca"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 2.3.2, formulas (20)–(26): HCA 的大压缩率、不做 overlapped compression、dense shared-KV MQA。 <a class="footnote-backref" href="#fnref-report-hca" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-window"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 2.3.3: sliding window branch 用于因果性与局部依赖建模。 <a class="footnote-backref" href="#fnref-report-window" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-code-ape"><p>DeepSeek-AI, DeepSeek-V4-Pro reference implementation, <code>inference/model.py</code>, <code>Compressor</code>: <code>ape</code> 参数按 <code>compress_ratio</code> 定义，说明 bias 是块内 offset 模板。 <a class="footnote-backref" href="#fnref-code-ape" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-report-rope"><p>DeepSeek-AI, <em>DeepSeek-V4 Technical Report</em>, Section 2.3.3: CSA/HCA 对 query、KV entry、attention output 的最后 64 维使用 partial RoPE，并对 output 使用反向 RoPE。 <a class="footnote-backref" href="#fnref-report-rope" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-code-rope-pos"><p>DeepSeek-AI, DeepSeek-V4-Pro reference implementation, <code>inference/model.py</code>, <code>Compressor.forward</code>: compressed KV 加 RoPE 时 prefill 使用 <code>freqs_cis[:cutoff:ratio]</code>，decode 使用 <code>freqs_cis[start_pos + 1 - compress_ratio]</code>。 <a class="footnote-backref" href="#fnref-code-rope-pos" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-code-mla"><p>DeepSeek-AI, DeepSeek-V4-Pro reference implementation, <code>inference/model.py</code>, <code>Attention</code>: 注释为 “MLA with sliding window + optional KV compression”，实现包含 <code>wq_a -&gt; q_norm -&gt; wq_b</code> 和 grouped low-rank output projection。 <a class="footnote-backref" href="#fnref-code-mla" aria-label="返回正文">返回</a></p></li>
+</ol>
+                    </div>
+
+                    <aside class="article-aside" aria-label="文章侧边栏">
+                        <h2>目录</h2>
+                        <nav class="article-toc" aria-label="文章目录">
+                            <a class="toc-level-3" href="#section-1">摘要</a>
+                            <a class="toc-level-3" href="#1-full-attention">1. 为什么要这么做：full attention 太贵</a>
+                            <a class="toc-level-3" href="#2-cache-cache">2. 先分清两件事：写 cache 和读 cache</a>
+                            <a class="toc-level-4" href="#2-1-cache-kv">2.1 写 cache：历史 KV 怎么被压缩</a>
+                            <a class="toc-level-4" href="#2-2-cache-query">2.2 读 cache：当前 query 怎么读取压缩历史</a>
+                            <a class="toc-level-3" href="#3-csa">3. CSA：小块压缩 + 稀疏选块</a>
+                            <a class="toc-level-3" href="#4-compression-weights">4. compression weights 怎么生成</a>
+                            <a class="toc-level-3" href="#5-csa-a-b-overlap">5. CSA 为什么是两路压缩：`a/b` 两路 + overlap</a>
+                            <a class="toc-level-4" href="#section-2">为什么需要两路？</a>
+                            <a class="toc-level-3" href="#6-csa-lightning-indexer-query-dependent">6. CSA 的 Lightning Indexer：压缩后再 query-dependent 选块</a>
+                            <a class="toc-level-4" href="#relu-top-k-k">ReLU 会不会导致 top-k 不满 K 个？</a>
+                            <a class="toc-level-3" href="#7-hca">7. HCA：压得更狠，但压缩后全看</a>
+                            <a class="toc-level-3" href="#8-overlap-hca-overlap">8. 既然 overlap 很重要，为什么 HCA 不做 overlap？</a>
+                            <a class="toc-level-4" href="#8-1-hca">8.1 HCA 的目标不是边界细节，而是全局低分辨率视野</a>
+                            <a class="toc-level-4" href="#8-2-hca-dense-attention">8.2 HCA 压缩后 dense attention，天然能看相邻块</a>
+                            <a class="toc-level-4" href="#8-3-hca-2m-overlap">8.3 给 HCA 加 2m' overlap 成本不划算</a>
+                            <a class="toc-level-3" href="#9-sliding-window-token-kv">9. Sliding window：最近 token 保留原始 KV</a>
+                            <a class="toc-level-3" href="#10">10. 语义边界问题：如果“一百一十万元”被切坏怎么办？</a>
+                            <a class="toc-level-4" href="#10-1-csa-overlap">10.1 CSA overlap 缓解边界切分</a>
+                            <a class="toc-level-4" href="#10-2-query-compressed-entries">10.2 query 可以同时看多个 compressed entries</a>
+                            <a class="toc-level-4" href="#10-3-128-token-kv">10.3 最近 128 token 直接看原始 KV</a>
+                            <a class="toc-level-4" href="#10-4-channel-wise-compression">10.4 channel-wise compression 比简单平均更强</a>
+                            <a class="toc-level-4" href="#10-5">10.5 但它不是无损压缩</a>
+                            <a class="toc-level-3" href="#11-query-independent">11. query-independent 压缩的表达力损失</a>
+                            <a class="toc-level-3" href="#12-learned-bias-rope">12. 位置编码：块内 learned bias 与全局 RoPE 是两套东西</a>
+                            <a class="toc-level-4" href="#12-1-compression-bias">12.1 compression bias 是块内相对位置，不是全局位置表</a>
+                            <a class="toc-level-4" href="#12-2-rope">12.2 全局位置由 RoPE 负责</a>
+                            <a class="toc-level-4" href="#12-3-compressed-kv">12.3 compressed KV 用哪个位置？</a>
+                            <a class="toc-level-4" href="#12-4">12.4 长度外推怎么做？</a>
+                            <a class="toc-level-3" href="#13-q-rope-mla-like">13. 低秩 Q 投影、RoPE 和 MLA-like 结构</a>
+                            <a class="toc-level-3" href="#14-csa-hca">14. CSA 和 HCA 的对照表</a>
+                            <a class="toc-level-3" href="#15-deepseek-v4">15. DeepSeek-V4 关键配置</a>
+                            <a class="toc-level-3" href="#16">16. 伪代码版：怎么实现</a>
+                            <a class="toc-level-4" href="#16-1-csa-cache">16.1 CSA 写 cache</a>
+                            <a class="toc-level-4" href="#16-2-csa-cache">16.2 CSA 读 cache</a>
+                            <a class="toc-level-4" href="#16-3-hca">16.3 HCA</a>
+                            <a class="toc-level-3" href="#17">17. 对外分享时最推荐讲的比喻</a>
+                            <a class="toc-level-3" href="#18-takeaways">18. 最终 takeaways</a>
+                            <a class="toc-level-3" href="#references">参考资料</a>
+                        </nav>
+
+                        <div class="article-info">
+                            <h2>文章信息</h2>
+                            <span>分类：LLM Systems</span>
+                            <span>创建：2026-05-20</span>
+                            <span>更新：2026-05-20</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
+    <script src="../../assets/site.js?v=20260608-1"></script>
+</body>
+</html>
