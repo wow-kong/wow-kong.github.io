@@ -96,9 +96,9 @@
 </figure>
 <p>可执行环境构建包括：</p>
 <ol>
-  <li><p>子链采样：从工具 DAG 图中采样一条工具调用链路 <span class="math">\(s_1 \subset G\)</span>。</p></li>
-  <li><p>实例化数据库：针对 <span class="math">\(s_1\)</span> 中的每个工具，依次实例化工具涉及的数据库状态。</p></li>
-  <li><p>任务生成：基于 <span class="math">\(s_1\)</span> 生成任务，包括任务描述、user profile、evaluation rubrics。</p></li>
+  <li><p>子链采样：从工具 DAG 图中采样一条工具调用链路 s₁ ⊂ G。</p></li>
+  <li><p>实例化数据库：针对 s₁ 中的每个工具，依次实例化工具涉及的数据库状态。</p></li>
+  <li><p>任务生成：基于 s₁ 生成任务，包括任务描述、user profile、evaluation rubrics。</p></li>
   <li><p>环境校验：对生成环境进行多次一致性校验，确保正确 tool chains 能通过 rubrics 验证，错误或残缺的 tool chains 无法通过验证。</p></li>
 </ol>
 <h5 id="section-5">环境扩展</h5>
@@ -107,8 +107,8 @@
   <li><p>交互复杂性体现为不同程度的澄清、规划和多步交互，从而鼓励模型展现丰富、适应性的 agentic 行为。</p></li>
   <li><p>环境复杂性体现为完成任务所需的工具个数和工具调用链路。</p>
 <ul>
-  <li><p>环境复杂性的提升相对直接，也是本文主要的环境扩展方式：向 <span class="math">\(s_1\)</span> 中引入更多工具调用节点。</p></li>
-  <li><p>具体做法是遍历 <span class="math">\(s_1\)</span> 未使用的工具集合 <span class="math">\(D_1 = G \backslash s_1\)</span>，通过引入所有依赖均被满足的工具，使现有工具调用链路 <span class="math">\(s_1\)</span> 更复杂，并确保每个合成环境至少包含 20 个工具。</p></li>
+  <li><p>环境复杂性的提升相对直接，也是本文主要的环境扩展方式：向 s₁ 中引入更多工具调用节点。</p></li>
+  <li><p>具体做法是遍历 s₁ 未使用的工具集合 D₁ = G ∖ s₁，通过引入所有依赖均被满足的工具，使现有工具调用链路 s₁ 更复杂，并确保每个合成环境至少包含 20 个工具。</p></li>
 </ul></li>
 </ol>
 <pre><code class="language-text"># 工具 DAG 图
@@ -258,7 +258,7 @@ University U</code></pre>
   <li><p><strong>双轴课程学习</strong>：从任务和能力两个角度对 task 进行分级。</p></li>
   <li><p>难度维度：通过 <code>pass@K</code> 排序，先学简单样本，再学难样本。</p></li>
   <li><p>能力维度：先学基础 tool-use，再学多步规划，再学复杂组合。</p></li>
-  <li><p><strong>预算动态分配</strong>：通过 <span class="math">\(v_{i,t}=V(\tau_i|\pi_{\theta_t}, \boldsymbol{m}_t)\)</span> 估计任务价值，用 heap-based greedy algorithm 分配 rollout 预算。模型现在弱在哪，就多 rollout 哪种 task。</p></li>
+  <li><p><strong>预算动态分配</strong>：通过 vᵢ,ₜ = V(τᵢ | πθₜ, 𝐦ₜ) 估计任务价值，用 heap-based greedy algorithm 分配 rollout 预算。模型现在弱在哪，就多 rollout 哪种 task。</p></li>
   <li><p><strong>自校验</strong>：将自验证加入奖励信号。当生成 RL 趋于平缓时，把自验证作为辅助任务加速模型收敛。</p></li>
 </ol>
 <h3 id="agentic-rl">Agentic RL 策略</h3>
