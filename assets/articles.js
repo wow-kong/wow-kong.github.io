@@ -30,6 +30,22 @@ window.SZF_ARTICLES = [
         ]
     },
     {
+        "title": "LongCat-Flash-Thinking-2601：Agentic Reasoning 技术分享",
+        "description": "梳理 LongCat-Flash-Thinking-2601 如何围绕环境、任务、冷启动、异步 RL 框架和上下文管理强化 agentic reasoning 能力。",
+        "date": "2026-02-13",
+        "category": "LLM Alignment",
+        "readTime": "13 min read",
+        "href": "articles/longcat-flash-thinking-2601/",
+        "image": "articles/longcat-flash-thinking-2601/assets/longcat-agentic-hero.jpg",
+        "tags": [
+            "LLM",
+            "Agentic Reasoning",
+            "RL",
+            "Tool Use",
+            "LongCat"
+        ]
+    },
+    {
         "title": "Confessions：让大模型学会“三省吾身”",
         "description": "关于 confession 机制、confession RL、奖励模型、实验结论和扩展探索的技术笔记。",
         "date": "2025-12-08",
