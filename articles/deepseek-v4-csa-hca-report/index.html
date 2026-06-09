@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="系统梳理 DeepSeek-V4 中 CSA/HCA 的压缩、检索、滑动窗口与位置编码设计，以及它们在百万 token 上下文下的效率权衡。">
     <title>DeepSeek-V4 中的 CSA/HCA 注意力机制解读 | Sun Zhifei</title>
-    <link rel="stylesheet" href="../../assets/site.css?v=20260608-10">
+    <link rel="stylesheet" href="../../assets/site.css?v=20260609-1">
     <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
     <script>
         window.MathJax = {
@@ -398,6 +398,7 @@ q_t per head      # 形成 head_dim 后
   <li><p>它不是简单的 “V3 MLA + CSA/HCA 叠加”。</p></li>
 </ul>
 <h3 id="14-csa-hca">14. CSA 和 HCA 的对照表</h3>
+<div class="article-table-wrap">
 <table>
   <thead>
     <tr>
@@ -454,7 +455,9 @@ q_t per head      # 形成 head_dim 后
     </tr>
   </tbody>
 </table>
+</div>
 <h3 id="15-deepseek-v4">15. DeepSeek-V4 关键配置</h3>
+<div class="article-table-wrap">
 <table>
   <thead>
     <tr>
@@ -511,6 +514,7 @@ q_t per head      # 形成 head_dim 后
     </tr>
   </tbody>
 </table>
+</div>
 <p>配置来自官方技术报告的 model setups 部分。<sup class="footnote-ref" id="fnref-report-config-2"><a href="#fn-report-config">2</a></sup></p>
 <h3 id="16">16. 伪代码版：怎么实现</h3>
 <h4 id="16-1-csa-cache">16.1 CSA 写 cache</h4>

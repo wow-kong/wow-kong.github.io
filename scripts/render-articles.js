@@ -7,7 +7,7 @@ const vm = require("vm");
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260608-10";
+const CSS_VERSION = "20260609-1";
 
 const HEADING_IDS = new Map([
   ["前言", "intro"],
@@ -295,7 +295,7 @@ const renderTable = (rows) => {
   const header = splitTableRow(rows[0]);
   const bodyRows = rows.slice(2).map(splitTableRow);
 
-  return [
+  const table = [
     "<table>",
     "  <thead>",
     "    <tr>",
@@ -311,6 +311,8 @@ const renderTable = (rows) => {
     "  </tbody>",
     "</table>",
   ].join("\n");
+
+  return `<div class="article-table-wrap">\n${table}\n</div>`;
 };
 
 const renderDisplayMath = (mathLines) =>

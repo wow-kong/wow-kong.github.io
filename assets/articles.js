@@ -16,6 +16,22 @@ window.SZF_ARTICLES = [
         ]
     },
     {
+        "title": "Claude Code / Codex 上下文管理机制调研报告",
+        "description": "从上下文分层、压缩管线、缓存、Memory 和 Subagent 机制出发，梳理 Claude Code / Codex 的上下文管理设计及其对自研 coding agent 的启发。",
+        "date": "2026-04-10",
+        "category": "LLM Systems",
+        "readTime": "24 min read",
+        "href": "articles/claude-code-context-management/",
+        "image": "articles/claude-code-context-management/assets/claude-code-context-cover.jpg",
+        "tags": [
+            "Claude Code",
+            "Codex",
+            "Context Engineering",
+            "Agent",
+            "Prompt Cache"
+        ]
+    },
+    {
         "title": "LongCat-Flash-Thinking-2601：Agentic Reasoning 技术分享",
         "description": "梳理 LongCat-Flash-Thinking-2601 如何围绕环境、任务、冷启动、异步 RL 框架和上下文管理强化 agentic reasoning 能力。",
         "date": "2026-02-13",
