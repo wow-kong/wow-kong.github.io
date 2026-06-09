@@ -7,7 +7,7 @@ const vm = require("vm");
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260608-2";
+const CSS_VERSION = "20260608-10";
 
 const HEADING_IDS = new Map([
   ["前言", "intro"],
@@ -146,6 +146,35 @@ const normalizeArticleHeroImage = (frontmatter, slug) => {
   const articlePrefix = `articles/${slug}/`;
 
   if (normalized.startsWith(articlePrefix)) {
+    return normalized.slice(articlePrefix.length);
+  }
+
+  if (value.startsWith("/") && normalized.startsWith("assets/")) {
+    return `../../${normalized}`;
+  }
+
+  if (normalized.startsWith("../../assets/")) {
+    return normalized;
+  }
+
+  if (normalized.startsWith("assets/")) {
+    return normalized;
+  }
+
+  return value.startsWith("/") ? `../..${value}` : value;
+};
+
+const normalizeArticleHeroCssImage = (frontmatter, slug) => {
+  const value = frontmatter.hero_image || frontmatter.thumbnail;
+
+  if (!value || /^(https?:|data:)/.test(value)) {
+    return value || "";
+  }
+
+  const normalized = value.startsWith("/") ? value.slice(1) : value;
+  const articlePrefix = `articles/${slug}/`;
+
+  if (normalized.startsWith(articlePrefix)) {
     return `../${normalized}`;
   }
 
@@ -161,7 +190,7 @@ const normalizeArticleHeroImage = (frontmatter, slug) => {
     return `../articles/${slug}/${normalized}`;
   }
 
-  return value.startsWith("/") ? `../..${value}` : value;
+  return value.startsWith("/") ? `..${value}` : value;
 };
 
 const inlineTokens = [];
@@ -633,8 +662,13 @@ const renderArticlePage = ({ slug, frontmatter, contentHtml, headings }) => {
   const updated = frontmatter.last_modified_at || frontmatter.updated_at || "";
   const bodyClass = frontmatter.body_class || "";
   const heroImage = normalizeArticleHeroImage(frontmatter, slug);
-  const heroStyle = heroImage
-    ? ` style="--article-hero-image: url(&quot;${escapeAttr(heroImage)}&quot;)"`
+  const heroCssImage = normalizeArticleHeroCssImage(frontmatter, slug);
+  const showHeroMedia = frontmatter.hero_image_layout === "inline";
+  const heroStyle = heroCssImage
+    ? ` style="--article-hero-image: url(&quot;${escapeAttr(heroCssImage)}&quot;)"`
+    : "";
+  const heroMedia = showHeroMedia && heroImage
+    ? `\n                <img class="article-hero-media" src="${escapeAttr(heroImage)}" alt="">`
     : "";
 
   return `<!DOCTYPE html>
@@ -665,6 +699,7 @@ const renderArticlePage = ({ slug, frontmatter, contentHtml, headings }) => {
     <main>
         <article>
             <section class="article-hero" aria-label="文章标题区"${heroStyle}>
+${heroMedia}
                 <div class="hero-inner">
                     <p class="eyebrow">Technical Notes · ${escapeHtml(category)}</p>
                     <h1>${escapeHtml(title)}</h1>

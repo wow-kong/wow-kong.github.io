@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="从旋转位置编码的公式推导出发，梳理 RoPE 的实现方式、远程衰减特性，以及 PI、NTK-aware、NTK-by-parts、YARN 等长度外推策略。">
+    <title>RoPE 公式推导与长度外推 | Sun Zhifei</title>
+    <link rel="stylesheet" href="../../assets/site.css?v=20260608-10">
+    <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["\\(", "\\)"], ["$", "$"]],
+                displayMath: [["\\[", "\\]"], ["$$", "$$"]]
+            },
+            options: {
+                skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+            }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body class="rope-article" data-site-root="../../" data-active-section="articles">
+    <header class="site-header" data-site-header></header>
+
+    <main>
+        <article>
+            <section class="article-hero" aria-label="文章标题区" style="--article-hero-image: url(&quot;../articles/rope-position-embedding/assets/rope-hero-cover.png&quot;)">
+
+                <div class="hero-inner">
+                    <p class="eyebrow">Technical Notes · LLM Systems</p>
+                    <h1>RoPE 公式推导与长度外推</h1>
+                    <p class="hero-copy">从旋转位置编码的公式推导出发，梳理 RoPE 的实现方式、远程衰减特性，以及 PI、NTK-aware、NTK-by-parts、YARN 等长度外推策略。</p>
+                    <div class="article-meta" aria-label="文章元信息">
+                        <span>2024-06-16</span>
+                        <span>LLM Systems</span>
+                        <span>11 min read</span>
+                    </div>
+                    <div class="tags" aria-label="文章标签">
+                        <span>LLM</span>
+                        <span>RoPE</span>
+                        <span>Position Encoding</span>
+                        <span>Long Context</span>
+                        <span>YARN</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="article-shell">
+                <div class="container article-layout">
+                    <div class="article-content">
+<h2 id="01">01 概述</h2>
+<p>RoPE（Rotary Position Embedding）是当前 LLM 中非常常见的位置编码方案。它通过对 query/key 的成对维度施加旋转，将 token 的绝对位置信息注入注意力计算，并在内积中自然体现相对位置关系。</p>
+<p>本文按“公式推导、代码实现、性质分析、长度外推”的顺序梳理 RoPE：先说明旋转矩阵如何把绝对位置转化为相对位置依赖，再讨论远程衰减、base 对长文本能力的影响，以及 PI、NTK-aware、NTK-by-parts、YARN 等外推策略的动机与实现。</p>
+<h2 id="02">02 公式推导</h2>
+<p>旋转位置编码（Rotary Position Embedding, RoPE）的基本思路，是在向量空间中借助向量旋转，等价实现：</p>
+<div class="math math-display">\[
+\langle f(\boldsymbol{q}_m, m), f(\boldsymbol{k}_n, n) \rangle
+= g(\boldsymbol{q}_m, \boldsymbol{k}_n, m - n)
+\]</div>
+<p>从而以乘性绝对位置编码的形式，向 attention 计算中引入 token-wise 相对位置的信息。</p>
+<p>假设：</p>
+<div class="math math-display">\[
+\boldsymbol{q} = \boldsymbol{h}W_Q,\quad
+\boldsymbol{k} = \boldsymbol{h}W_K \in [B, L, h, d]
+\]</div>
+<p>其中 <span class="math">\((\boldsymbol{q}_m, \boldsymbol{k}_n)\)</span> 分别表示 <span class="math">\((\boldsymbol{q}, \boldsymbol{k})\)</span> 中 token 位置为 <span class="math">\((m,n)\)</span> 的分量。RoPE 的做法是沿 <code>axis=-1</code>，将 <span class="math">\(\boldsymbol{q}_m=(q_0,q_1,\dots,q_{d-2},q_{d-1})\)</span> 两两视为一组向量 <span class="math">\(\boldsymbol{q}_{m,i}=(q_i,q_{i+1})\)</span>，并根据当前 token 的绝对位置 <span class="math">\(m\)</span> 进行旋转变换：</p>
+<div class="math math-display">\[
+\tilde{\boldsymbol{q}}_{m,0}
+= f(\boldsymbol{q}_{m,0}, m)
+= R_m\boldsymbol{q}_{m,0}
+=
+\begin{pmatrix}
+\cos m\theta &amp; -\sin m\theta \\
+\sin m\theta &amp; \cos m\theta
+\end{pmatrix}
+\begin{pmatrix}
+q_0 \\
+q_1
+\end{pmatrix}
+\]</div>
+<div class="math math-display">\[
+\tilde{\boldsymbol{k}}_{n,0}
+= f(\boldsymbol{k}_{n,0}, n)
+= R_n\boldsymbol{k}_{n,0}
+=
+\begin{pmatrix}
+\cos n\theta &amp; -\sin n\theta \\
+\sin n\theta &amp; \cos n\theta
+\end{pmatrix}
+\begin{pmatrix}
+k_0 \\
+k_1
+\end{pmatrix}
+\]</div>
+<figure class="article-figure">
+  <img src="assets/rope-rotation-overview.png" alt="RoPE 通过二维旋转引入位置信息">
+  <figcaption>RoPE 通过二维旋转引入位置信息</figcaption>
+</figure>
+<p>通过与当前 token 绝对位置有关的向量旋转 <span class="math">\((R_m,R_n)\)</span>，我们成功向原先位置不敏感的 <span class="math">\((\boldsymbol{q}, \boldsymbol{k})\)</span> 引入了绝对位置信息。基于 <span class="math">\((\tilde{\boldsymbol{q}}_m, \tilde{\boldsymbol{k}}_n)\)</span>，进一步通过内积计算注意力分数：</p>
+<div class="math math-display">\[
+\mathrm{attn\_score}_{m,n}
+= \langle \tilde{\boldsymbol{q}}_m, \tilde{\boldsymbol{k}}_n \rangle
+= (R_m\boldsymbol{q}_m)^T(R_n\boldsymbol{k}_n)
+\]</div>
+<p>结合旋转矩阵的性质 <span class="math">\(R_a^T=R_{-a}\)</span>、<span class="math">\(R_{a+b}=R_aR_b\)</span>，可得：</p>
+<div class="math math-display">\[
+\langle f(\boldsymbol{q}_m,m),f(\boldsymbol{k}_n,n) \rangle
+= (R_m\boldsymbol{q}_m)^T(R_n\boldsymbol{k}_n)
+= \boldsymbol{q}_m^T R_{n-m}\boldsymbol{k}_n
+:= g(\boldsymbol{q}_m,\boldsymbol{k}_n,n-m)
+\]</div>
+<p>将上式完整表达为：</p>
+<div class="math math-display">\[
+\begin{pmatrix}
+\cos m\theta_0 &amp; -\sin m\theta_0 &amp; 0 &amp; 0 &amp; \dots &amp; 0 &amp; 0\\
+\sin m\theta_0 &amp; \cos m\theta_0 &amp; 0 &amp; 0 &amp; \dots &amp; 0 &amp; 0\\
+0 &amp; 0 &amp; \cos m\theta_1 &amp; -\sin m\theta_1 &amp; \dots &amp; 0 &amp; 0\\
+0 &amp; 0 &amp; \sin m\theta_1 &amp; \cos m\theta_1 &amp; \dots &amp; 0 &amp; 0\\
+\vdots &amp; \vdots &amp; \vdots &amp; \vdots &amp; \ddots &amp; \vdots &amp; \vdots\\
+0 &amp; 0 &amp; 0 &amp; 0 &amp; \dots &amp; \cos m\theta_{d/2-1} &amp; -\sin m\theta_{d/2-1}\\
+0 &amp; 0 &amp; 0 &amp; 0 &amp; \dots &amp; \sin m\theta_{d/2-1} &amp; \cos m\theta_{d/2-1}
+\end{pmatrix}
+\begin{pmatrix}
+q_0 \\
+q_1 \\
+q_2 \\
+q_3 \\
+\vdots\\
+q_{d-2} \\
+q_{d-1}
+\end{pmatrix}
+\]</div>
+<p>考虑到旋转矩阵是极度稀疏的矩阵，在实现时一般会使用更加高效的计算方式：</p>
+<div class="math math-display">\[
+\begin{pmatrix}
+q_0 \\
+q_1 \\
+q_2 \\
+q_3 \\
+\vdots\\
+q_{d-2} \\
+q_{d-1}
+\end{pmatrix}
+\otimes
+\begin{pmatrix}
+\cos m\theta_0 \\
+\cos m\theta_0 \\
+\cos m\theta_1 \\
+\cos m\theta_1 \\
+\vdots\\
+\cos m\theta_{d/2-1} \\
+\cos m\theta_{d/2-1}
+\end{pmatrix}
++
+\begin{pmatrix}
+-q_1 \\
+q_0 \\
+-q_3 \\
+q_2 \\
+\vdots\\
+-q_{d-1} \\
+q_{d-2}
+\end{pmatrix}
+\otimes
+\begin{pmatrix}
+\sin m\theta_0 \\
+\sin m\theta_0 \\
+\sin m\theta_1 \\
+\sin m\theta_1 \\
+\vdots\\
+\sin m\theta_{d/2-1} \\
+\sin m\theta_{d/2-1}
+\end{pmatrix}
+\]</div>
+<p>其中旋转频率沿用了 Sinusoidal 绝对位置编码中的算法，以确保 RoPE 的远程衰减特性：</p>
+<div class="math math-display">\[
+\theta_i = \mathrm{base}^{-2i/d}
+\]</div>
+<h2 id="03">03 代码实现</h2>
+<p>基于 LLaMA 代码给出一份 RoPE 的典型实现范例。</p>
+<p>首先基于模型超参，生成三角函数值。由于这些值是常量，可以在训练阶段缓存并长期使用：</p>
+<pre><code class="language-python">class LlamaRotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
+        super().__init__()
+        self.scaling_factor = scaling_factor
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.register_buffer(&quot;inv_freq&quot;, inv_freq, persistent=False)
+        # For BC we register cos and sin cached
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+        t = t / self.scaling_factor
+        freqs = torch.outer(t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer(&quot;_cos_cached&quot;, emb.cos().to(torch.get_default_dtype()), persistent=False)
+        self.register_buffer(&quot;_sin_cached&quot;, emb.sin().to(torch.get_default_dtype()), persistent=False)
+
+    @property
+    def sin_cached(self):
+        logger.warning_once(
+            &quot;The sin_cached attribute will be removed in 4.39. Bear in mind that its contents changed in v4.38. Use &quot;
+            &quot;the forward method of RoPE from now on instead. It is not used in the `LlamaAttention` class&quot;
+        )
+        return self._sin_cached
+
+    @property
+    def cos_cached(self):
+        logger.warning_once(
+            &quot;The cos_cached attribute will be removed in 4.39. Bear in mind that its contents changed in v4.38. Use &quot;
+            &quot;the forward method of RoPE from now on instead. It is not used in the `LlamaAttention` class&quot;
+        )
+        return self._cos_cached
+
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 since bfloat16 loses precision on long contexts
+        # See https://github.com/huggingface/transformers/pull/29285
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != &quot;mps&quot; else &quot;cpu&quot;
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)</code></pre>
+<p>然后对 q/k 附加乘性绝对位置编码。为了便于操作，实现时一般直接对半切分，而非奇偶分：</p>
+<pre><code class="language-python">def rotate_half(x):
+    &quot;&quot;&quot;Rotates half the hidden dims of the input.&quot;&quot;&quot;
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    &quot;&quot;&quot;Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k.
+
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    &quot;&quot;&quot;
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed</code></pre>
+<h2 id="04-rope">04 RoPE 的远程衰减</h2>
+<p>为了更好地分析远程衰减特性，可以将 RoPE 表示为复数形式，并将向量旋转以复数乘法的方式表示为：</p>
+<div class="math math-display">\[
+f(\boldsymbol{q}_{m,0},m)
+= R_m\boldsymbol{q}_{m,0}
+= (q_0 + iq_1)(\cos m\theta_0 + i\sin m\theta_0)
+= \boldsymbol{q}_{m,0}e^{im\theta_0}
+\]</div>
+<div class="math math-display">\[
+f(\boldsymbol{k}_{n,0},n)
+= R_n\boldsymbol{k}_{n,0}
+= (k_0 + ik_1)(\cos n\theta_0 + i\sin n\theta_0)
+= \boldsymbol{k}_{n,0}e^{in\theta_0}
+\]</div>
+<p>由于 <span class="math">\(\langle \boldsymbol{a}, \boldsymbol{b}\rangle = \operatorname{Re}[\boldsymbol{a}\boldsymbol{b}^*]\)</span>，因此：</p>
+<div class="math math-display">\[
+\langle f(\boldsymbol{q}_{m,0},m),f(\boldsymbol{k}_{n,0},n) \rangle
+= \langle \boldsymbol{q}_{m,0}e^{im\theta_0}, \boldsymbol{k}_{n,0}e^{in\theta_0}\rangle
+= \operatorname{Re}[\boldsymbol{q}_{m,0}\boldsymbol{k}_{n,0}^*e^{i(m-n)\theta_0}]
+\]</div>
+<p>拓展到一般情况：</p>
+<div class="math math-display">\[
+\langle f(\boldsymbol{q}_m,m),f(\boldsymbol{k}_n,n) \rangle
+=
+\operatorname{Re}\left[
+\sum_{i=0}^{d/2-1}
+\boldsymbol{q}_{m,2i}\boldsymbol{k}_{n,2i}^* e^{i(m-n)\theta_i}
+\right]
+\]</div>
+<p>不妨记 <span class="math">\(h_i=\boldsymbol{q}_{m,2i}\boldsymbol{k}_{n,2i}^*\)</span>，<span class="math">\(S_j=\sum_{i=0}^{j} e^{i(m-n)\theta_i}\)</span>，并约定 <span class="math">\(h_{d/2}=0, S_0=0\)</span>，则可以基于 Abel 变换将上式转变为如下形式：</p>
+<div class="math math-display">\[
+\sum_{i=0}^{d/2-1}
+\boldsymbol{q}_{m,2i}\boldsymbol{k}_{n,2i}^* e^{i(m-n)\theta_i}
+=
+\sum_{i=0}^{d/2-1} h_i(S_{i+1}-S_i)
+=
+-\sum_{i=0}^{d/2-1}S_{i+1}(h_{i+1}-h_i)
+\]</div>
+<p>从而：</p>
+<div class="math math-display">\[
+\left|
+\sum_{i=0}^{d/2-1}
+\boldsymbol{q}_{m,2i}\boldsymbol{k}_{n,2i}^* e^{i(m-n)\theta_i}
+\right|
+=
+\left|
+\sum_{i=0}^{d/2-1}S_{i+1}(h_{i+1}-h_i)
+\right|
+\]</div>
+<div class="math math-display">\[
+\leq
+\sum_{i=0}^{d/2-1}|S_{i+1}||h_{i+1}-h_i|
+\leq
+\left(\max_i |h_{i+1}-h_i|\right)
+\sum_{i=0}^{d/2-1}|S_{i+1}|
+\]</div>
+<p>通过考察上界 <span class="math">\(\sum_{i=0}^{d/2-1}|S_{i+1}|\)</span>，可以观测 attention score 与相对位置的关系。注意力分数呈现明显的远程衰减特性，即 LLM 能够天然地对临近 token 赋予更多注意力、对更远 token 赋予更少注意力。</p>
+<p>此外，不同的 base 呈现不同的衰减趋势：越大的 base 衰减越慢、衰减区间越长，具备更好的长文本处理能力；但相应地，转速越慢、相邻 token 的间距越小，也需要更充分的训练以区分位置关系。</p>
+<figure class="article-figure">
+  <img src="assets/rope-decay-by-base.png" alt="不同 base 下 RoPE 注意力分数上界随相对位置变化">
+  <figcaption>不同 base 下 RoPE 注意力分数上界随相对位置变化</figcaption>
+</figure>
+<p>除了明显的衰减趋势之外，图中还呈现一定的震荡现象。然而，曲线表达的是注意力分数上界与相对位置的关系；实际上模型可以通过训练使衰减曲线更加平滑。但在训练区间之外，震荡性质就无法保证了，所以这也是 RoPE 无法长度外推到任意距离的主要原因。</p>
+<h2 id="05-rope">05 RoPE 与外推</h2>
+<p>当预测阶段文本长度 <span class="math">\(L_{\mathrm{inf}}\)</span> 超过 <span class="math">\(L_{\mathrm{train}}\)</span> 时（即外推），LLM 主要面临两个问题：预测时用到了没训练过的位置编码（不管绝对还是相对）；预测时注意力机制所处理的 token 数量远超训练时的数量。</p>
+<p>目前各种外推算法主要解决的是第一个问题：通过不同缩放策略，将超出训练分布的最大相位进行压缩还原，记 <span class="math">\(c=L_{\mathrm{train}}/L_{\mathrm{inf}}\leq1\)</span>。</p>
+<p>线性插值（Positional Interpolation, PI）通过线性压缩，直接将 token 位置等比压缩，使整个维度分量的旋转速度变慢、周期变大：</p>
+<div class="math math-display">\[
+\mathrm{PI}(\theta_i)=c\cdot\theta_i
+\]</div>
+<p>NTK-aware 相比 PI 是一种非线性的缩放算法：通过对 <span class="math">\(\mathrm{base}\)</span> 乘以 <span class="math">\(c^{\frac{d}{2-d}}\)</span>，相当于 PI 中将常数项 <span class="math">\(c\)</span> 变成了与维度有关的变量 <span class="math">\(c^{\frac{i}{d/2-1}}\)</span>。</p>
+<p>在 <span class="math">\(i\rightarrow0\)</span> 的高频部分，<span class="math">\(c^{\frac{i}{d/2-1}}\)</span> 的值趋向于 1，因此依赖充分训练的高频分量进行外推；在 <span class="math">\(i\rightarrow\frac{d}{2}-1\)</span> 的低频部分，<span class="math">\(c^{\frac{i}{d/2-1}}\)</span> 的值趋向于 <span class="math">\(c\)</span>，因此依赖插值确保相位不会越界。</p>
+<div class="math math-display">\[
+\mathrm{NTK}_{\mathrm{aware}}(\theta_i)
+=
+\left(\mathrm{base}\cdot c^{\frac{d}{2-d}}\right)^{-\frac{2i}{d}}
+=
+c^{\frac{i}{d/2-1}}\cdot\theta_i
+\]</div>
+<p>NTK-by-parts 在 NTK-aware 的基础上，对高频、低频做进一步区分。定义旋转周期为 <span class="math">\(\lambda_i=2\pi/\theta_i\)</span>，因此维度 <span class="math">\(i\)</span> 的位置编码在训练中最大转了 <span class="math">\(r_i=L_{\mathrm{train}}/\lambda_i\)</span> 圈。</p>
+<p>NTK-by-parts 额外引入超参 <span class="math">\((\alpha,\beta)\)</span>：<span class="math">\(r_i&lt;\alpha\)</span> 时为低频分量，外推时更易受未经训练过的位置编码影响，因此进行线性插值；<span class="math">\(r_i&gt;\beta\)</span> 时为高频分量，旋转周期足够模型外推，因此不做处理；中间部分则基于 NTK-aware 进行外推。</p>
+<div class="math math-display">\[
+\mathrm{NTK}_{\mathrm{by\_parts}}(\theta_i)
+=
+(1-\gamma(r_i))\mathrm{PI}(\theta_i)+\gamma(r_i)\theta_i
+\]</div>
+<div class="math math-display">\[
+\gamma(r_i)=
+\begin{cases}
+0, &amp; r_i&lt;\alpha \\
+1, &amp; r_i&gt;\beta \\
+\frac{r_i-\alpha}{\beta-\alpha}, &amp; \mathrm{otherwise}
+\end{cases}
+\]</div>
+<p>YARN 在 NTK-by-parts 的基础上，对注意力分布进行了修正。由于注意力分数会随着相对距离的增加逐渐衰减，PI 或 NTK 类方法本质上都通过降低旋转频率、缩短 token 之间的相对距离实现外推，这会导致注意力分数上界整体变大、破坏注意力原有分布。</p>
+<p>因此，一个非常直观的想法是，在调整旋转频率以外推之后，通过温度系数适当修正注意力分布：</p>
+<div class="math math-display">\[
+\frac{\boldsymbol{q}^T\boldsymbol{k}}{\sqrt{d}}
+\rightarrow
+\frac{\boldsymbol{q}^T\boldsymbol{k}}{t\sqrt{d}},
+\quad
+\sqrt{\frac{1}{t}}=1-0.1\ln(c)
+\]</div>
+<p>因此可以看出，位置编码部分实际可以区分为高频域和低频域：</p>
+<ol>
+  <li><p><span class="math">\(r_i&gt;\beta\)</span> 的高频域在训练阶段遍历多个周期，因此圆内的每个角度几乎都能得到充分训练，<span class="math">\(\theta_i\)</span> 几乎不存在 OOD 问题，可以直接进行外推。此外，由于高频分量的周期性，模型只能学到相对局部的位置关系。</p></li>
+  <li><p><span class="math">\(r_i&lt;1\)</span> 的低频域在训练阶段未转完一个周期，在 <span class="math">\(l&gt;L_{\mathrm{train}}\rightarrow l\cdot\mathrm{base}^{-2i/d}&gt;L_{\mathrm{train}}\cdot\mathrm{base}^{-2i/d}\)</span> 时，就会导致 <span class="math">\(\theta_i\)</span> 越界，因此需要通过内插压缩到原本的弧内。与高频分量不同，模型可以通过（尤其是单调区间的）低频分量的远程衰减关系，学习与第一个 token 的绝对位置关系。</p></li>
+</ol>
+<figure class="article-figure">
+  <img src="assets/rope-extrapolation-frequency.png" alt="高频外推与低频内插示意">
+  <figcaption>高频外推与低频内插示意</figcaption>
+</figure>
+<p>因此，NTK 系列及 YARN 在内插时都基于高频外推、低频内插的准则，而 PI 对不同频段的分量等比压缩，扰乱了模型的局部分辨率，因此没经过微调的情况下往往效果很差。</p>
+<h2 id="06-deepseek-r1">06 DeepSeek-R1 的外推算法实现</h2>
+<p>DeepSeek-R1 使用了 YARN 外推算法，这也是当前较主流的外推方案。相比其他 PTM，DeepSeek 也使用了相对保守的 base 值，大概支持 10,000 个 token。</p>
+<pre><code class="language-json">{
+  &quot;rope_scaling&quot;: {
+    &quot;beta_fast&quot;: 32,
+    &quot;beta_slow&quot;: 1,
+    &quot;factor&quot;: 40,
+    &quot;mscale&quot;: 1.0,
+    &quot;mscale_all_dim&quot;: 1.0,
+    &quot;original_max_position_embeddings&quot;: 4096,
+    &quot;type&quot;: &quot;yarn&quot;
+  },
+  &quot;rope_theta&quot;: 10000
+}</code></pre>
+<pre><code class="language-python"># Inverse dim formula to find dim based on number of rotations
+def yarn_find_correction_dim(
+    num_rotations, dim, base=10000, max_position_embeddings=2048
+):
+    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
+        2 * math.log(base)
+    )
+
+
+# Find dim range bounds based on rotations
+def yarn_find_correction_range(
+    low_rot, high_rot, dim, base=10000, max_position_embeddings=2048
+):
+    low = math.floor(
+        yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    )
+    high = math.ceil(
+        yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    )
+    return max(low, 0), min(high, dim - 1)  # Clamp values just in case
+
+
+def yarn_get_mscale(scale=1, mscale=1):
+    if scale &lt;= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def yarn_linear_ramp_mask(min, max, dim):
+    if min == max:
+        max += 0.001  # Prevent singularity
+
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+
+class DeepseekV3YarnRotaryEmbedding(DeepseekV3RotaryEmbedding):
+
+    def __init__(
+        self,
+        dim,
+        max_position_embeddings=2048,
+        base=10000,
+        device=None,
+        scaling_factor=1.0,
+        original_max_position_embeddings=4096,
+        beta_fast=32,
+        beta_slow=1,
+        mscale=1,
+        mscale_all_dim=0,
+    ):
+        self.scaling_factor = scaling_factor
+        self.original_max_position_embeddings = original_max_position_embeddings
+        self.beta_fast = beta_fast
+        self.beta_slow = beta_slow
+        self.mscale = mscale
+        self.mscale_all_dim = mscale_all_dim
+        super().__init__(dim, max_position_embeddings, base, device)
+
+    def _set_cos_sin_cache(self, seq_len, device, dtype):
+        self.max_seq_len_cached = seq_len
+        dim = self.dim
+
+        freq_extra = 1.0 / (
+            self.base
+            ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
+        )
+        freq_inter = 1.0 / (
+            self.scaling_factor
+            * self.base
+            ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
+        )
+
+        low, high = yarn_find_correction_range(
+            self.beta_fast,
+            self.beta_slow,
+            dim,
+            self.base,
+            self.original_max_position_embeddings,
+        )
+        inv_freq_mask = 1.0 - yarn_linear_ramp_mask(low, high, dim // 2).to(
+            device=device, dtype=torch.float32
+        )
+        inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
+        self.register_buffer(&quot;inv_freq&quot;, inv_freq, persistent=False)
+
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, inv_freq)
+
+        _mscale = float(
+            yarn_get_mscale(self.scaling_factor, self.mscale)
+            / yarn_get_mscale(self.scaling_factor, self.mscale_all_dim)
+        )
+
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer(
+            &quot;cos_cached&quot;, (emb.cos() * _mscale).to(dtype), persistent=False
+        )
+        self.register_buffer(
+            &quot;sin_cached&quot;, (emb.sin() * _mscale).to(dtype), persistent=False
+        )</code></pre>
+<h2 id="section-1">参考内容</h2>
+<ol>
+  <li><p>Transformer 升级之路：2、博采众长的旋转式位置编码</p></li>
+  <li><p>Transformer 升级之路：18、RoPE 的底数设计原则</p></li>
+  <li><p>Transformer 升级之路：7、长度外推性与局部注意力</p></li>
+  <li><p>LLM（廿三）：LLM 中的长文本问题</p></li>
+  <li><p>LLM 细节盘点(2)：位置编码</p></li>
+</ol>
+                    </div>
+
+                    <aside class="article-aside" aria-label="文章侧边栏">
+                        <h2>目录</h2>
+                        <nav class="article-toc" aria-label="文章目录">
+                            <a class="toc-level-2" href="#01">01 概述</a>
+                            <a class="toc-level-2" href="#02">02 公式推导</a>
+                            <a class="toc-level-2" href="#03">03 代码实现</a>
+                            <a class="toc-level-2" href="#04-rope">04 RoPE 的远程衰减</a>
+                            <a class="toc-level-2" href="#05-rope">05 RoPE 与外推</a>
+                            <a class="toc-level-2" href="#06-deepseek-r1">06 DeepSeek-R1 的外推算法实现</a>
+                            <a class="toc-level-2" href="#section-1">参考内容</a>
+                        </nav>
+
+                        <div class="article-info">
+                            <h2>文章信息</h2>
+                            <span>分类：LLM Systems</span>
+                            <span>创建：2024-06-16</span>
+                            <span>更新：2024-06-16</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
+    <script src="../../assets/site.js?v=20260608-1"></script>
+</body>
+</html>

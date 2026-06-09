@@ -1,19 +1,5 @@
 window.SZF_ARTICLES = [
     {
-        "title": "LLM 后训练中的数据构建经验",
-        "description": "一篇用于确认文章模板、详情页排版和文章卡片样式的示例技术笔记。",
-        "date": "2026-06-04",
-        "category": "NLP",
-        "readTime": "6 min read",
-        "href": "articles/llm-post-training-data/",
-        "image": "assets/article-hero-forest.jpg",
-        "tags": [
-            "LLM",
-            "Post-training",
-            "Data"
-        ]
-    },
-    {
         "title": "DeepSeek-V4 中的 CSA/HCA 注意力机制解读",
         "description": "系统梳理 DeepSeek-V4 中 CSA/HCA 的压缩、检索、滑动窗口与位置编码设计，以及它们在百万 token 上下文下的效率权衡。",
         "date": "2026-05-20",
@@ -59,6 +45,38 @@ window.SZF_ARTICLES = [
             "RL",
             "Reward Model",
             "Confession"
+        ]
+    },
+    {
+        "title": "RoPE 公式推导与长度外推",
+        "description": "从旋转位置编码的公式推导出发，梳理 RoPE 的实现方式、远程衰减特性，以及 PI、NTK-aware、NTK-by-parts、YARN 等长度外推策略。",
+        "date": "2024-06-16",
+        "category": "LLM Systems",
+        "readTime": "11 min read",
+        "href": "articles/rope-position-embedding/",
+        "image": "articles/rope-position-embedding/assets/rope-hero-cover.png",
+        "tags": [
+            "LLM",
+            "RoPE",
+            "Position Encoding",
+            "Long Context",
+            "YARN"
+        ]
+    },
+    {
+        "title": "如何完成一次成功的对齐(1)：SFT篇",
+        "description": "梳理 SFT 阶段围绕质量、复杂性、多样性的数据自动生成与筛选策略，以及幻觉与知识一致性问题。",
+        "date": "2024-05-28",
+        "category": "LLM Alignment",
+        "readTime": "13 min read",
+        "href": "articles/successful-alignment-sft/",
+        "image": "articles/successful-alignment-sft/assets/sft-alignment-hero-generated.png",
+        "tags": [
+            "LLM",
+            "SFT",
+            "Alignment",
+            "Instruction Tuning",
+            "Data Selection"
         ]
     }
 ];
