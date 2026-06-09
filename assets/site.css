@@ -1579,6 +1579,26 @@ main {
     z-index: 2;
 }
 
+.rope-article .article-hero {
+    min-height: clamp(420px, 52vh, 560px);
+    background:
+        linear-gradient(90deg, rgba(4, 12, 12, 0.9), rgba(4, 12, 12, 0.62) 38%, rgba(4, 12, 12, 0.1) 76%),
+        linear-gradient(0deg, rgba(4, 12, 12, 0.5), rgba(4, 12, 12, 0.02) 48%),
+        var(--article-hero-image, url("article-hero-forest.jpg")) center / cover no-repeat;
+}
+
+.rope-article .article-hero .hero-inner {
+    z-index: 1;
+}
+
+.rope-article .article-hero h1 {
+    max-width: 520px;
+}
+
+.rope-article .article-hero .hero-copy {
+    max-width: 560px;
+}
+
 @media (max-width: 520px) {
     .confessions-article .article-hero {
         min-height: 520px;
@@ -1601,6 +1621,18 @@ main {
     }
 
     .sft-alignment-article .article-hero .hero-inner {
+        padding-top: 184px;
+    }
+
+    .rope-article .article-hero {
+        min-height: 560px;
+        background:
+            linear-gradient(0deg, rgba(4, 12, 12, 0.86), rgba(4, 12, 12, 0.45) 52%, rgba(4, 12, 12, 0.82)),
+            linear-gradient(90deg, rgba(4, 12, 12, 0.88), rgba(4, 12, 12, 0.18)),
+            var(--article-hero-image, url("article-hero-forest.jpg")) 64% center / cover no-repeat;
+    }
+
+    .rope-article .article-hero .hero-inner {
         padding-top: 184px;
     }
 }

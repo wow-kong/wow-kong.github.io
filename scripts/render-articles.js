@@ -7,7 +7,7 @@ const vm = require("vm");
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260608-5";
+const CSS_VERSION = "20260608-10";
 
 const HEADING_IDS = new Map([
   ["前言", "intro"],
@@ -162,6 +162,35 @@ const normalizeArticleHeroImage = (frontmatter, slug) => {
   }
 
   return value.startsWith("/") ? `../..${value}` : value;
+};
+
+const normalizeArticleHeroCssImage = (frontmatter, slug) => {
+  const value = frontmatter.hero_image || frontmatter.thumbnail;
+
+  if (!value || /^(https?:|data:)/.test(value)) {
+    return value || "";
+  }
+
+  const normalized = value.startsWith("/") ? value.slice(1) : value;
+  const articlePrefix = `articles/${slug}/`;
+
+  if (normalized.startsWith(articlePrefix)) {
+    return `../${normalized}`;
+  }
+
+  if (value.startsWith("/") && normalized.startsWith("assets/")) {
+    return normalized.slice("assets/".length);
+  }
+
+  if (normalized.startsWith("../../assets/")) {
+    return normalized.slice("../../assets/".length);
+  }
+
+  if (normalized.startsWith("assets/")) {
+    return `../articles/${slug}/${normalized}`;
+  }
+
+  return value.startsWith("/") ? `..${value}` : value;
 };
 
 const inlineTokens = [];
@@ -633,9 +662,10 @@ const renderArticlePage = ({ slug, frontmatter, contentHtml, headings }) => {
   const updated = frontmatter.last_modified_at || frontmatter.updated_at || "";
   const bodyClass = frontmatter.body_class || "";
   const heroImage = normalizeArticleHeroImage(frontmatter, slug);
+  const heroCssImage = normalizeArticleHeroCssImage(frontmatter, slug);
   const showHeroMedia = frontmatter.hero_image_layout === "inline";
-  const heroStyle = heroImage
-    ? ` style="--article-hero-image: url(&quot;${escapeAttr(heroImage)}&quot;)"`
+  const heroStyle = heroCssImage
+    ? ` style="--article-hero-image: url(&quot;${escapeAttr(heroCssImage)}&quot;)"`
     : "";
   const heroMedia = showHeroMedia && heroImage
     ? `\n                <img class="article-hero-media" src="${escapeAttr(heroImage)}" alt="">`

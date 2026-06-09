@@ -48,6 +48,22 @@ window.SZF_ARTICLES = [
         ]
     },
     {
+        "title": "RoPE 公式推导与长度外推",
+        "description": "从旋转位置编码的公式推导出发，梳理 RoPE 的实现方式、远程衰减特性，以及 PI、NTK-aware、NTK-by-parts、YARN 等长度外推策略。",
+        "date": "2024-06-16",
+        "category": "LLM Systems",
+        "readTime": "11 min read",
+        "href": "articles/rope-position-embedding/",
+        "image": "articles/rope-position-embedding/assets/rope-hero-cover.png",
+        "tags": [
+            "LLM",
+            "RoPE",
+            "Position Encoding",
+            "Long Context",
+            "YARN"
+        ]
+    },
+    {
         "title": "如何完成一次成功的对齐(1)：SFT篇",
         "description": "梳理 SFT 阶段围绕质量、复杂性、多样性的数据自动生成与筛选策略，以及幻觉与知识一致性问题。",
         "date": "2024-05-28",
