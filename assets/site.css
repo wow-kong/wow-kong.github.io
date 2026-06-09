@@ -723,6 +723,9 @@ main {
 .article-aside {
     position: sticky;
     top: 96px;
+    display: flex;
+    max-height: calc(100vh - 120px);
+    flex-direction: column;
     min-width: 0;
     padding-left: 22px;
     border-left: 1px solid var(--line);
@@ -740,7 +743,17 @@ main {
     gap: 10px;
 }
 
+.article-toc {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(15, 111, 104, 0.3) transparent;
+}
+
 .article-info {
+    flex: 0 0 auto;
     margin-top: 30px;
     padding-top: 22px;
     border-top: 1px solid var(--line);
@@ -1353,6 +1366,9 @@ main {
     .experience-sidebar,
     .article-aside {
         position: static;
+        display: block;
+        max-height: none;
+        overflow: visible;
     }
 
     .article-layout {
@@ -1363,6 +1379,11 @@ main {
         padding: 22px 0 0;
         border-top: 1px solid var(--line);
         border-left: 0;
+    }
+
+    .article-toc {
+        overflow: visible;
+        padding-right: 0;
     }
 
     .footer-inner {

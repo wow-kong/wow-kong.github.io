@@ -7,7 +7,7 @@ const vm = require("vm");
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260609-1";
+const CSS_VERSION = "20260609-2";
 
 const HEADING_IDS = new Map([
   ["前言", "intro"],
