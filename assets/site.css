@@ -619,13 +619,17 @@ main {
     vertical-align: -0.28em;
 }
 
-.article-content table {
-    display: block;
+.article-table-wrap {
     width: 100%;
     overflow-x: auto;
-    border-collapse: collapse;
     border: 1px solid var(--line);
     border-radius: var(--radius);
+    background: var(--surface);
+}
+
+.article-content table {
+    width: 100%;
+    border-collapse: collapse;
     background: var(--surface);
 }
 

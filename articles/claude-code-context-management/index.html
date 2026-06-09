@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="从上下文分层、压缩管线、缓存、Memory 和 Subagent 机制出发，梳理 Claude Code / Codex 的上下文管理设计及其对自研 coding agent 的启发。">
+    <title>Claude Code / Codex 上下文管理机制调研报告 | Sun Zhifei</title>
+    <link rel="stylesheet" href="../../assets/site.css?v=20260609-1">
+    <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["\\(", "\\)"], ["$", "$"]],
+                displayMath: [["\\[", "\\]"], ["$$", "$$"]]
+            },
+            options: {
+                skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+            }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body class="claude-code-context-article" data-site-root="../../" data-active-section="articles">
+    <header class="site-header" data-site-header></header>
+
+    <main>
+        <article>
+            <section class="article-hero" aria-label="文章标题区" style="--article-hero-image: url(&quot;../articles/claude-code-context-management/assets/claude-code-context-cover.jpg&quot;)">
+
+                <div class="hero-inner">
+                    <p class="eyebrow">Technical Notes · LLM Systems</p>
+                    <h1>Claude Code / Codex 上下文管理机制调研报告</h1>
+                    <p class="hero-copy">从上下文分层、压缩管线、缓存、Memory 和 Subagent 机制出发，梳理 Claude Code / Codex 的上下文管理设计及其对自研 coding agent 的启发。</p>
+                    <div class="article-meta" aria-label="文章元信息">
+                        <span>2026-04-10</span>
+                        <span>LLM Systems</span>
+                        <span>24 min read</span>
+                    </div>
+                    <div class="tags" aria-label="文章标签">
+                        <span>Claude Code</span>
+                        <span>Codex</span>
+                        <span>Context Engineering</span>
+                        <span>Agent</span>
+                        <span>Prompt Cache</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="article-shell">
+                <div class="container article-layout">
+                    <div class="article-content">
+<p class="article-lead">面向外部分享版本   主题：Claude Code 的上下文生命周期、压缩管线、缓存影响、Subagent、Memory 与动态上下文注入机制   更新时间：2026-04-10</p>
+<hr>
+<h3 id="0">0. 摘要</h3>
+<p>Claude Code 的上下文管理不是一个简单的“历史对话 + 自动总结”功能，而是一套围绕 <strong>有限 context window</strong> 设计的 agent runtime。它把上下文当成稀缺运行内存，把文件系统、memory、transcript、tool result persistence、skills、MCP、hooks、subagents 当成外部存储和控制平面，然后在每次模型调用前动态决定“哪些信息值得进入当前推理窗口”。</p>
+<p>可以用一句话概括：</p>
+<blockquote>
+<p><strong>Claude Code 通过“动态组装上下文 → 工具输出限流与持久化 → 低成本历史清理 → 结构折叠 → 语义压缩 → 外部记忆与子代理隔离”的组合，维持长任务中的连续性、成本和模型注意力质量。</strong></p>
+</blockquote>
+<p>本文把相关机制分成九个部分：</p>
+<ol>
+  <li><p>上下文总体心智模型</p></li>
+  <li><p>上下文来源与分层</p></li>
+  <li><p>五层压缩管线</p></li>
+  <li><p>Budget Reduction、Snip、Microcompact 的触发与信息损失</p></li>
+  <li><p>Auto-compact、summary 与 prompt cache 的关系</p></li>
+  <li><p>Memory / CLAUDE.md 的加载与重建机制</p></li>
+  <li><p>Subagent 的调度策略与 Claude Code / Codex 差异</p></li>
+  <li><p>时间感知、hidden context、system reminder 的动态注入</p></li>
+  <li><p>对自研 coding agent 的工程启发</p></li>
+</ol>
+<p>资料口径说明：本文主要基于 Claude Code / Claude API / Codex 官方文档，以及一篇公开源码分析论文。对于 Claude Code 内部源码细节，本文只讨论公开分析中已经描述的架构行为，不引用泄露源码原文。部分实现细节可能随 Claude Code 版本、feature flag、运行环境变化而变化。</p>
+<hr>
+<h3 id="1-context-engineering-coding-agent">1. 为什么 context engineering 是 coding agent 的核心问题</h3>
+<p>传统聊天机器人可以把上下文近似看成“历史消息列表”。但 coding agent 不一样。一次任务中会产生大量高噪声信息：文件读取、grep 结果、bash 输出、测试日志、stack trace、diff、工具错误、hook 反馈、MCP 工具结果、subagent 返回等。</p>
+<p>Anthropic 在 context engineering 文章里把 context 定义为模型采样时实际收到的 token 集合，并强调 agent 的 context 是每轮动态变化、需要持续筛选的资源，而不只是 prompt 文本本身。它还明确提到，长 horizon agent 需要 compaction、structured note-taking、multi-agent architecture 等手段来维持连续性。<sup class="footnote-ref" id="fnref-anthropic-context-engineering"><a href="#fn-anthropic-context-engineering">1</a></sup></p>
+<p>所以 Claude Code 的目标不是“尽可能塞满 context window”，而是同时优化三件事：</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>目标</th>
+      <th>含义</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>相关性</td>
+      <td>当前任务最需要的信息要进入窗口</td>
+    </tr>
+    <tr>
+      <td>连续性</td>
+      <td>长任务不能因为压缩丢掉关键状态</td>
+    </tr>
+    <tr>
+      <td>成本与性能</td>
+      <td>降低输入 token、提高 prompt cache 命中、减少上下文污染</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>一个更准确的心智模型是：</p>
+<pre><code class="language-text">文件系统 / memory / transcript / MCP / skills / hooks / subagents
+                     ↓
+             Context assembler
+                     ↓
+      当前模型调用的 projected context view
+                     ↓
+         模型推理 → 工具调用 → 新事件进入 runtime
+                     ↓
+       budget reduction / snip / microcompact / collapse / compact</code></pre>
+<p><strong>关键点：底层历史可以 append-only 保存，但每次发给模型的上下文视图不一定 append-only。</strong></p>
+<hr>
+<h3 id="2-claude-code">2. Claude Code 的上下文分层</h3>
+<p>Claude Code 官方 prompt caching 文档把请求前缀分成三层：system prompt、project context、conversation。每次请求都会重新发送完整上下文；模型本身不在请求之间保存状态，prompt caching 通过精确 prefix match 复用已处理过的前缀。<sup class="footnote-ref" id="fnref-cc-prompt-caching"><a href="#fn-cc-prompt-caching">2</a></sup></p>
+<h4 id="2-1">2.1 三层主结构</h4>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>层级</th>
+      <th>内容</th>
+      <th>变化时机</th>
+      <th>缓存影响</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>System prompt layer</td>
+      <td>核心行为规则、工具定义、output style</td>
+      <td>工具定义变化、Claude Code 升级等</td>
+      <td>变化会导致后续全部 prefix 失效</td>
+    </tr>
+    <tr>
+      <td>Project context layer</td>
+      <td><code>CLAUDE.md</code>、auto memory、unscoped rules</td>
+      <td>session start、<code>/clear</code>、<code>/compact</code> 后重载</td>
+      <td>内容变化会导致 project context 之后失效</td>
+    </tr>
+    <tr>
+      <td>Conversation layer</td>
+      <td>用户消息、Claude 回复、tool results、system reminders</td>
+      <td>每轮追加</td>
+      <td>正常 append 对缓存友好，compact 会重建这一层</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>这里一个常见误解是：<strong>CLAUDE.md 和 auto memory 不是 system prompt layer。</strong> 官方文档明确说 CLAUDE.md 内容作为 user message 交给 Claude，而不是强制性的 system 配置；如果要硬性阻止行为，应使用 settings 或 PreToolUse hook。<sup class="footnote-ref" id="fnref-cc-memory"><a href="#fn-cc-memory">3</a></sup></p>
+<h4 id="2-2">2.2 启动时自动进入上下文的内容</h4>
+<p>Claude Code context window 文档说明，在用户输入前，<code>CLAUDE.md</code>、auto memory、MCP tool names、skill descriptions 等会加载进 context；随着 Claude 工作，文件读取、path-scoped rules、hook 结果会继续增加上下文。<sup class="footnote-ref" id="fnref-cc-context-window"><a href="#fn-cc-context-window">4</a></sup></p>
+<p>启动内容大致包括：</p>
+<pre><code class="language-text">System prompt / tool definitions / output style
+CLAUDE.md hierarchy
+Auto memory: MEMORY.md 前 200 行或 25KB
+MCP tool names / server instructions
+Skill names / descriptions
+当前工作目录、平台、shell、部分环境信息</code></pre>
+<h4 id="2-3">2.3 动态进入上下文的内容</h4>
+<p>任务运行中，以下内容会按需进入：</p>
+<pre><code class="language-text">Read / Grep / Bash / Edit 等工具调用与结果
+文件变化 system reminder
+hooks additionalContext
+MCP resource / tool result
+skill body
+subagent result summary
+/compact summary</code></pre>
+<p>这使 Claude Code 更像一个“上下文操作系统”：稳定指令、动态状态、外部存储、工具 I/O、压缩视图被拆开管理，而不是拼成一个巨大的 prompt。</p>
+<hr>
+<h3 id="3">3. 上下文生命周期</h3>
+<p>一次较长任务的上下文生命周期可以抽象为：</p>
+<pre><code class="language-text">阶段 A：启动
+  加载 system prompt、CLAUDE.md、auto memory、MCP tool names、skill descriptions
+
+阶段 B：执行
+  用户输入 → 模型推理 → 工具调用 → 工具结果进入 context
+
+阶段 C：膨胀
+  文件读取、搜索结果、测试日志、diff、hook context 持续增加 token
+
+阶段 D：轻量整形
+  限制大工具输出、清理旧工具结果、移除低价值历史碎片
+
+阶段 E：结构折叠
+  对过长历史生成 projected view，但不一定破坏底层 transcript
+
+阶段 F：语义压缩
+  接近阈值时生成 structured summary，替换旧历史，保留最近尾部消息
+
+阶段 G：重建当前视图
+  重新注入稳定 project context、summary、recent tail、仍有效的 runtime state
+
+阶段 H：异常恢复
+  prompt too long 或 near capacity 时走 reactive compact / overflow recovery</code></pre>
+<p>官方 context window 文档也明确建议：在上下文填满前，可以用 <code>/compact focus on ...</code> 指定压缩重点；切换无关任务时用 <code>/clear</code>；大规模读取交给 subagent 以避免污染主上下文。<sup class="footnote-ref" id="fnref-cc-context-window-2"><a href="#fn-cc-context-window">4</a></sup></p>
+<hr>
+<h3 id="4">4. 五层压缩管线：从便宜清理到语义总结</h3>
+<p>公开源码分析论文把 Claude Code 的 pre-model context shapers 概括为五层：Budget reduction、Snip、Microcompact、Context collapse、Auto-compact。前几层更偏确定性或启发式，最后一层才是完整模型摘要。<sup class="footnote-ref" id="fnref-arxiv-five-layer"><a href="#fn-arxiv-five-layer">5</a></sup></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>层级</th>
+      <th>策略</th>
+      <th>主要对象</th>
+      <th>成本</th>
+      <th>是否依赖 LLM judge</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>Budget Reduction</td>
+      <td>单个超大 tool result</td>
+      <td>很低</td>
+      <td>否</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Snip</td>
+      <td>旧历史片段、低价值结构噪声</td>
+      <td>低</td>
+      <td>否，主要启发式</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Microcompact</td>
+      <td>旧工具结果、缓存压力、时间路径</td>
+      <td>低到中</td>
+      <td>否，主要规则/阈值</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Context Collapse</td>
+      <td>过长历史的 projected view</td>
+      <td>中</td>
+      <td>通常不是 LLM judge</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Auto-compact</td>
+      <td>接近窗口阈值的完整历史</td>
+      <td>高</td>
+      <td>触发靠规则；summary 生成靠模型</td>
+    </tr>
+    <tr>
+      <td>兜底</td>
+      <td>Reactive Compact</td>
+      <td>prompt-too-long / near capacity</td>
+      <td>高</td>
+      <td>恢复阶段可能用模型</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>需要注意：<strong>五层管线不是五次总结。</strong> 前几层大多是确定性清理、引用化、视图投影；真正的语义 summary 主要发生在 auto-compact。</p>
+<hr>
+<h3 id="5-budget-reduction">5. Budget Reduction：大输出外部化，而不是让大结果淹没窗口</h3>
+<p>Budget Reduction 处理的是单个工具结果过大的情况，例如：</p>
+<pre><code class="language-text">Read 一个几万行文件
+Bash 输出大量日志
+Grep 返回海量匹配
+MCP 工具返回完整数据库 schema
+测试输出巨大 stack trace</code></pre>
+<p>公开源码分析称，Budget Reduction 会对 tool result 施加 per-message size limit，并把超大输出替换成 content reference；替换内容会持久化，以便 resume 或后续查询重建。<sup class="footnote-ref" id="fnref-arxiv-five-layer-2"><a href="#fn-arxiv-five-layer">5</a></sup></p>
+<p>Claude Code 官方 changelog 也提到，超过 50K characters 的 tool results 会被持久化到磁盘，以减少 context window 使用并延长会话寿命；较早版本还提到“大型 bash/tool outputs 被保存到磁盘而非截断，Claude 可通过文件引用访问完整输出”。<sup class="footnote-ref" id="fnref-cc-changelog"><a href="#fn-cc-changelog">6</a></sup></p>
+<p>因此它不是单纯裁剪，而更接近：</p>
+<pre><code class="language-text">原始大输出：保存到外部存储
+active context：保留 preview + file reference + metadata
+后续需要：Claude 读取引用文件，或重新执行工具</code></pre>
+<p>但这不等于“模型已经理解了完整输出”。模型只看到了预览和引用；如果后续推理需要完整内容，它必须显式读取引用文件，或者重新运行工具。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>场景</th>
+      <th>恢复方式</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>大文件读取</td>
+      <td>重新 Read 原文件或读取持久化引用</td>
+    </tr>
+    <tr>
+      <td>大 grep/search 结果</td>
+      <td>读取引用或重新搜索</td>
+    </tr>
+    <tr>
+      <td>大 bash/test 输出</td>
+      <td>读取持久化日志；必要时重跑命令</td>
+    </tr>
+    <tr>
+      <td>非确定性外部结果</td>
+      <td>更依赖持久化，因为重跑可能不同</td>
+    </tr>
+    <tr>
+      <td>重要结论</td>
+      <td>应写入 summary / memory / TODO，而不是只依赖大输出引用</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>工程上，Budget Reduction 是 <strong>原始数据外部化</strong>，不是 <strong>语义保真压缩</strong>。</p>
+<hr>
+<h3 id="6-snip">6. Snip：如何判断“无价值历史碎片”</h3>
+<p>Snip 容易被误解成“让 LLM 判断哪些历史不重要”。更准确地说，它大概率是结构性、时间深度驱动的启发式清理。</p>
+<p>公开源码分析称 Snip 是 lightweight trim，会移除 older history segments，并返回 <code>messages / tokensFreed / boundaryMessage</code>；它处理的是 temporal depth，而不是对每段文本做语义审判。<sup class="footnote-ref" id="fnref-arxiv-five-layer-3"><a href="#fn-arxiv-five-layer">5</a></sup></p>
+<h4 id="6-1-snip">6.1 Snip 更像垃圾回收</h4>
+<p>容易被清理的内容通常包括：</p>
+<pre><code class="language-text">很旧的中间状态
+重复 progress marker
+空消息 / 僵尸消息 / 孤儿 tool_result
+已经被 summary 覆盖的旧历史片段
+旧的工具结果 placeholder
+过期的 runtime marker
+被后续事实覆盖的临时观察</code></pre>
+<p>通常会被保护的内容包括：</p>
+<pre><code class="language-text">当前用户请求
+最近若干轮消息
+未完成 tool_use / tool_result 对
+最新工具结果
+compact summary / boundary
+当前任务 TODO / plan
+显式用户约束
+正在执行的操作状态</code></pre>
+<h4 id="6-2-llm-judge">6.2 为什么不适合 LLM judge</h4>
+<p>让 LLM 判断每段历史是否有价值，会引入额外模型调用、延迟、成本和不确定性，而且判断本身也要消耗上下文。Snip 的价值恰恰是便宜、频繁、确定。</p>
+<p>所以它更像：</p>
+<pre><code class="language-text">if old_enough
+  and outside_recent_tail
+  and structurally_safe
+  and not protected_by_boundary
+  and tokens_freed_is_worthwhile:
+      snip_or_replace_with_boundary()</code></pre>
+<p>而不是：</p>
+<pre><code class="language-text">if LLM_says_low_value(message):
+    delete(message)</code></pre>
+<p>风险在于：<strong>结构上低价值，不代表语义上一定低价值。</strong> 例如用户早期说过“不要改 public API”“必须兼容 Python 3.9”，这些话可能很早，但很关键。长期规则应该进入 <code>CLAUDE.md</code>、auto memory、plan/TODO，而不是只留在早期聊天里。</p>
+<hr>
+<h3 id="7-microcompact-cache-aware-trade-off">7. Microcompact：旧工具结果清理与 cache-aware trade-off</h3>
+<p>Microcompact 主要处理“工具结果已经不值得原样留在 active context”的情况。比如 Claude 曾经 grep 过、读过文件、跑过测试，这些结果未来可重新获取，因此不一定要长期占据上下文。</p>
+<p>Anthropic API 的 context editing 文档提供了一个相似机制：<code>clear_tool_uses_20250919</code> 会在上下文超过阈值时清理最旧的 tool results，用 placeholder 告诉 Claude 结果已被移除，并支持 <code>trigger</code>、<code>keep</code>、<code>clear_at_least</code>、<code>exclude_tools</code> 等参数。<sup class="footnote-ref" id="fnref-anthropic-context-editing"><a href="#fn-anthropic-context-editing">7</a></sup></p>
+<p>这说明该类机制的触发主要是规则/阈值，而不是 LLM judge：</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>参数/因素</th>
+      <th>作用</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>trigger</code></td>
+      <td>超过多少 input tokens 或 tool uses 后开始清理</td>
+    </tr>
+    <tr>
+      <td><code>keep</code></td>
+      <td>保留最近多少个 tool use/result 对</td>
+    </tr>
+    <tr>
+      <td><code>clear_at_least</code></td>
+      <td>至少释放多少 token，否则不值得破坏 cache</td>
+    </tr>
+    <tr>
+      <td><code>exclude_tools</code></td>
+      <td>指定某些工具结果永不清理</td>
+    </tr>
+    <tr>
+      <td>cache pressure</td>
+      <td>清理会打断 prefix cache，因此必须权衡收益</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>核心 trade-off：</p>
+<pre><code class="language-text">不清理：每轮携带大量旧工具结果，cache read 成本和上下文污染持续存在
+清理：当前破坏某个 prefix 点之后的 cache，但释放大量 token，后续请求更短</code></pre>
+<p>所以 Microcompact 的本质不是“无脑删旧结果”，而是 <strong>可重算信息的 cache-aware 外部化/占位化</strong>。</p>
+<hr>
+<h3 id="8-context-collapse">8. Context Collapse：读时投影，而不是破坏历史</h3>
+<p>Context Collapse 是一个更结构化的策略：它不一定直接修改底层 REPL / transcript 历史，而是在模型查询时把 <code>messagesForQuery</code> 替换成折叠后的 projected view。公开源码分析把它描述为 read-time projection：模型看到的是折叠版，完整历史仍可用于重建。<sup class="footnote-ref" id="fnref-arxiv-five-layer-4"><a href="#fn-arxiv-five-layer">5</a></sup></p>
+<p>这解决了一个重要矛盾：</p>
+<pre><code class="language-text">审计 / resume / fork：需要完整 append-only transcript
+模型推理：不应该每次都看完整历史</code></pre>
+<p>因此底层可以保存全量事件流，但模型输入可以是：</p>
+<pre><code class="language-text">compact boundary
++ summary
++ recent tail
++ active attachments
++ runtime state reminders</code></pre>
+<p>这比“截断旧消息”更接近操作系统里的虚拟内存视图。</p>
+<hr>
+<h3 id="9-auto-compact">9. Auto-compact：模型生成结构化交接摘要</h3>
+<p>Auto-compact 是真正的语义压缩。Claude API compaction 文档描述的流程是：当输入 token 超过配置阈值时，API 生成当前对话 summary，创建 <code>compaction</code> block，并在后续请求中从 summary 继续；默认 trigger 是 150,000 tokens，且必须至少 50,000 tokens。<sup class="footnote-ref" id="fnref-anthropic-compaction"><a href="#fn-anthropic-compaction">8</a></sup></p>
+<p>Claude Code 的 <code>/compact</code> 类似：用 structured summary 替换旧 conversation history，同时大部分启动内容会自动重新加载。官方 context window 文档列出了 compaction 后各类内容的去留：system prompt/output style 不变，project-root <code>CLAUDE.md</code> 和 auto memory 会重注入，path-scoped rules 和 nested <code>CLAUDE.md</code> 要等再次读取匹配文件才回来，skill bodies 会在预算内重注入。<sup class="footnote-ref" id="fnref-cc-context-window-3"><a href="#fn-cc-context-window">4</a></sup></p>
+<h4 id="9-1-summary">9.1 Summary 应保留什么</h4>
+<p>高质量 summary 不应只是聊天摘要，而应该像任务交接文档：</p>
+<pre><code class="language-text">用户真实目标
+当前任务状态
+已修改内容
+关键文件和路径
+架构决策
+未解决 bug
+失败测试和错误信息
+下一步计划
+不能重复踩的坑
+用户明确约束
+最近重要上下文</code></pre>
+<p>Anthropic 的 context engineering 文章也说，Claude Code 的 compaction 会保留架构决策、未解决 bug 和实现细节，同时丢弃冗余工具输出或消息。<sup class="footnote-ref" id="fnref-anthropic-context-engineering-2"><a href="#fn-anthropic-context-engineering">1</a></sup></p>
+<h4 id="9-2-summary">9.2 Summary 使用哪个模型</h4>
+<p>Claude API compaction 文档明确说：summary 使用请求中指定的同一个模型，没有选项改用另一个更便宜的模型。它还提示，在有 tools 的请求中，内部 summarization step 偶尔可能调用工具而不是写 summary，因此可以通过自定义 instructions 明确要求“不要调用工具，只输出文本”。<sup class="footnote-ref" id="fnref-anthropic-compaction-2"><a href="#fn-anthropic-compaction">8</a></sup></p>
+<p>所以它不是：</p>
+<pre><code class="language-text">主模型 → 第三方小模型总结 → 主模型继续</code></pre>
+<p>而更像：</p>
+<pre><code class="language-text">当前模型 + 同一段历史 + summarize instruction → structured summary</code></pre>
+<h4 id="9-3-maxlen">9.3 接近 maxLen 时的风险</h4>
+<p>如果等到窗口几乎耗尽再 compact，会有风险：</p>
+<pre><code class="language-text">没有足够输出预算写 summary
+输入过长导致请求失败
+summary 过度抽象或遗漏细节
+工具环境下 summary 失败</code></pre>
+<p>所以更稳的策略是在任务边界主动压缩，或用 <code>/compact focus on ...</code> 指定保留重点，而不是完全依赖自动压缩。</p>
+<hr>
+<h3 id="10-prompt-cache">10. Prompt cache：为什么压缩会破坏部分缓存，但仍然值得</h3>
+<p>Claude Code 每轮请求都发送完整上下文；prompt cache 通过精确 prefix match 复用已处理前缀。官方文档强调：prefix 中任何变化都会导致变化点之后重算，没有 per-file 或 per-segment caching。<sup class="footnote-ref" id="fnref-cc-prompt-caching-2"><a href="#fn-cc-prompt-caching">2</a></sup></p>
+<h4 id="10-1-append-only">10.1 正常 append-only 对缓存友好</h4>
+<pre><code class="language-text">Turn 1: [system][project][m1]
+Turn 2: [system][project][m1][m2]
+Turn 3: [system][project][m1][m2][m3]</code></pre>
+<p>前缀稳定，所以 cache 命中高。</p>
+<h4 id="10-2-compact-conversation-layer">10.2 Compact 会重建 conversation layer</h4>
+<pre><code class="language-text">Compact 前:
+[system][project][m1][m2][m3]...[mN]
+
+Compact 后:
+[system][project][summary][recent_tail][runtime_state]</code></pre>
+<p>这不再是旧 conversation prefix，因此 conversation layer cache 会失效。但 system prompt layer 通常仍可复用；project context 如果 <code>CLAUDE.md</code> / memory 没变，也可以继续命中。官方文档明确说，<code>/compact</code> 会替换 message history，使 conversation layer 失效；system 层会复用，project context 会从磁盘重载，只有内容没变时才 cache-hit。<sup class="footnote-ref" id="fnref-cc-prompt-caching-3"><a href="#fn-cc-prompt-caching">2</a></sup></p>
+<h4 id="10-3-compact">10.3 Compact 不是无脑增加成本</h4>
+<p>Auto-compact 的经济账是：</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>阶段</th>
+      <th>成本</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>compact 当轮</td>
+      <td>额外一次 summary 采样；可能有 cache write 成本</td>
+    </tr>
+    <tr>
+      <td>compact 后</td>
+      <td>上下文变短，每轮 input/cache read 成本下降</td>
+    </tr>
+    <tr>
+      <td>长任务总体</td>
+      <td>降低 prompt-too-long 风险和 context rot</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>Claude API 文档也说明 compaction 是额外 sampling step，会计入 rate limits 和 billing；一次请求中可能先有 compaction iteration，再有正常 message iteration。<sup class="footnote-ref" id="fnref-anthropic-compaction-3"><a href="#fn-anthropic-compaction">8</a></sup></p>
+<p>因此更准确的判断是：<strong>compact 是一次性换缓存，用更短的新历史替代越来越臃肿的旧历史。</strong> 它牺牲短期缓存连续性，换长期成本和注意力质量。</p>
+<hr>
+<h3 id="11-memory-claude-md-project-context-system-prompt">11. Memory / CLAUDE.md：半稳定 project context，不是 system prompt</h3>
+<p>Claude Code 有两类跨会话记忆：</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>机制</th>
+      <th>谁写</th>
+      <th>内容</th>
+      <th>加载方式</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>CLAUDE.md</code></td>
+      <td>用户/团队/组织</td>
+      <td>规则、约定、项目背景</td>
+      <td>session start 加载；目录层级和懒加载</td>
+    </tr>
+    <tr>
+      <td>Auto memory</td>
+      <td>Claude</td>
+      <td>从用户纠正和偏好中积累的 notes</td>
+      <td><code>MEMORY.md</code> 前 200 行或 25KB 每次会话加载，topic files 按需读取</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>官方 memory 文档说明：auto memory 的 <code>MEMORY.md</code> 是 memory 目录入口，前 200 行或 25KB 会在每次 conversation 开始时加载；详细 topic files 不在启动时加载。<sup class="footnote-ref" id="fnref-cc-memory-2"><a href="#fn-cc-memory">3</a></sup></p>
+<h4 id="11-1-memory-system-prompt-cache">11.1 Memory 修改是否导致 system prompt cache 大面积失效？</h4>
+<p>不会直接导致 system prompt layer 失效，因为 memory 属于 project context layer，不是 system prompt layer。</p>
+<p>更准确的过程是：</p>
+<pre><code class="language-text">启动 session：
+  [system][project context: memory v1][conversation]
+
+运行中 Claude 写 memory：
+  磁盘 memory 变成 v2
+  当前已加载 context 仍是 v1
+  本轮不会 retroactively 改 prefix
+
+之后 /compact、/clear、restart：
+  重新加载 memory v2
+  system prompt 仍可命中
+  project context 从变化点后可能重建
+  conversation layer 因 compact 被 summary 替换</code></pre>
+<p>官方 prompt caching 文档也说：编辑 project-root 和 user-level <code>CLAUDE.md</code> mid-session 不会使缓存失效，但新内容也不会生效；新内容要等下一次 <code>/clear</code>、<code>/compact</code> 或 restart 才加载。<sup class="footnote-ref" id="fnref-cc-prompt-caching-4"><a href="#fn-cc-prompt-caching">2</a></sup></p>
+<h4 id="11-2-memory">11.2 Memory 的工程建议</h4>
+<pre><code class="language-text">稳定、长期、每次都需要的规则 → CLAUDE.md
+Claude 从经验中学到的偏好/洞察 → auto memory
+详细笔记 → topic files，按需读取
+当前任务状态 → TODO / plan / handoff
+短期动态事实 → hook reminder，带 as_of/ttl</code></pre>
+<p>不要把频繁变化的大量状态写入启动加载的 <code>MEMORY.md</code>，否则会增加 project context 成本并影响 cache。</p>
+<hr>
+<h3 id="12-subagent">12. Subagent：把大规模探索隔离在主上下文之外</h3>
+<p>Subagent 是 Claude Code 里非常关键的 context isolation 机制。官方文档说：当一个 side task 会把大量 search results、logs、file contents 塞进主对话，而主对话后续不需要反复引用这些原始内容时，应该使用 subagent；subagent 在自己的 context window 中工作，只返回 summary。<sup class="footnote-ref" id="fnref-cc-subagents"><a href="#fn-cc-subagents">9</a></sup></p>
+<h4 id="12-1-claude-code">12.1 Claude Code：默认模型自主调度，用户可强干预</h4>
+<p>Claude Code 会根据 subagent 的 <code>description</code> 决定何时委派任务。内置 subagents 包括 Explore、Plan、General-purpose。Explore 是快速 read-only agent，使用 Haiku，适合文件发现、代码搜索、代码库探索；Plan 用于 plan mode 的代码库研究；General-purpose 适合复杂多步任务和代码修改。<sup class="footnote-ref" id="fnref-cc-subagents-2"><a href="#fn-cc-subagents">9</a></sup></p>
+<p>控制权可以分成三层：</p>
+<pre><code class="language-text">用户层：明确要求使用某个 subagent，或 @ mention / agent setting
+配置层：description、tool 权限、model、permissionMode、memory、hooks 等
+模型层：Claude 根据任务和 description 决定是否委派、如何写 delegation prompt</code></pre>
+<p>默认建议：</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>场景</th>
+      <th>策略</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>大规模代码搜索 / repo 理解</td>
+      <td>让 Claude 自主用 Explore，或显式要求用 Explore</td>
+    </tr>
+    <tr>
+      <td>并行审查安全、性能、测试</td>
+      <td>用户显式指定多个 subagents</td>
+    </tr>
+    <tr>
+      <td>需要 read-only 保证</td>
+      <td>显式指定 read-only subagent</td>
+    </tr>
+    <tr>
+      <td>小范围改一个函数</td>
+      <td>不用 subagent</td>
+    </tr>
+    <tr>
+      <td>子任务需要大量主上下文背景</td>
+      <td>考虑 fork，而不是普通 isolated subagent</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<h4 id="12-2-isolated-subagent-vs-fork">12.2 Isolated subagent vs fork</h4>
+<p>普通 subagent 每次从 fresh isolated context 开始，不看主对话历史、已读文件或已 invoked skills；Claude 会写 delegation message 给它。例外是 fork：fork 会继承父会话完整历史、system prompt、tools、model，适合“重新解释背景太贵”的 side task。<sup class="footnote-ref" id="fnref-cc-subagents-3"><a href="#fn-cc-subagents">9</a></sup></p>
+<pre><code class="language-text">普通 subagent：
+  省主上下文，隔离性强，但需要重新交代背景
+
+fork subagent：
+  共享背景，启动顺，但隔离性弱</code></pre>
+<h4 id="12-3-codex-subagent">12.3 Codex：必须显式触发 subagent</h4>
+<p>Codex 的设计与 Claude Code 不同。OpenAI Codex 文档明确说：Codex 只在用户明确要求时 spawn subagents；它不会自动开子代理。用户需要直接说“spawn two agents”“delegate this work in parallel”“use one agent per point”等。<sup class="footnote-ref" id="fnref-codex-subagents"><a href="#fn-codex-subagents">10</a></sup></p>
+<p>Codex subagent workflow 适合并行的 read-heavy 任务，例如探索、测试、triage、summarization；对于多个 agent 同时改代码的 write-heavy 工作流要谨慎，因为容易产生冲突和协调成本。<sup class="footnote-ref" id="fnref-codex-subagent-concepts"><a href="#fn-codex-subagent-concepts">11</a></sup></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>维度</th>
+      <th>Claude Code</th>
+      <th>Codex</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>subagent 是否自动触发</td>
+      <td>会，Claude 根据 description 自主判断</td>
+      <td>不会，必须用户显式要求</td>
+    </tr>
+    <tr>
+      <td>用户最佳姿势</td>
+      <td>写好 subagent description；关键任务显式指定</td>
+      <td>明确说明 spawn 几个、各自做什么、怎么汇总</td>
+    </tr>
+    <tr>
+      <td>主要价值</td>
+      <td>隔离探索噪声、权限/模型定制</td>
+      <td>并行探索、并行审查、并行任务拆分</td>
+    </tr>
+    <tr>
+      <td>成本</td>
+      <td>subagent 有独立 context 和 cache</td>
+      <td>每个 subagent 都做自己的模型/工具工作，token 更多</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<hr>
+<h3 id="13-hidden-context">13. 动态时间感知与 hidden context</h3>
+<p>用户常观察到 Claude Code 或 Codex 在执行任务时能感知时间变化。更准确的解释是：<strong>模型没有持续走动的内部时钟，而是 agent runtime 在模型调用边界注入了时间和环境状态。</strong></p>
+<h4 id="13-1-claude-code">13.1 Claude Code 的时间/环境注入</h4>
+<p>公开源码分析提到 Claude Code 有 <code>currentDate</code> 之类的 user context，以及 git status 等 system context；官方 hooks 文档则说明 hook 的 <code>additionalContext</code> 会被包装成 system reminder 插入 conversation，Claude 在下一次模型请求时读取。<sup class="footnote-ref" id="fnref-arxiv-cache-dynamic"><a href="#fn-arxiv-cache-dynamic">12</a></sup><sup class="footnote-ref" id="fnref-cc-hooks"><a href="#fn-cc-hooks">13</a></sup></p>
+<p>典型来源包括：</p>
+<pre><code class="language-text">currentDate / timezone / cwd / shell 等启动或 turn context
+UserPromptSubmit hook 注入当前时间、branch、issue、CI 状态
+Bash `date` 或日志时间戳
+skill dynamic context injection，例如 !`git diff HEAD`
+file-changed system reminder
+PostToolUse / PostToolBatch hook 追加工具执行后的环境事实</code></pre>
+<h4 id="13-2-codex-context">13.2 Codex 的环境 context</h4>
+<p>Codex 官方 subagent 文档不把 environment context 作为重点，但 OpenAI Codex GitHub 讨论和 rollout 文件示例显示，Codex session logs 中可以看到 <code>turn_context</code> / <code>environment_context</code> 一类信息，包含 current date、timezone、cwd、sandbox/approval policy 等。官方维护者也建议通过 <code>~/.codex/sessions/.../rollout-*.jsonl</code> 查看实际注入内容。<sup class="footnote-ref" id="fnref-codex-rollout-discussion"><a href="#fn-codex-rollout-discussion">14</a></sup></p>
+<h4 id="13-3-hidden-context">13.3 Hidden context 会过期，必须显式管理新鲜度</h4>
+<p>Claude Code hooks 文档特别提醒：mid-session 注入的 system reminder 会保存进 transcript；resume 时旧文本会被重放，而不是重新运行过去的 hook，因此 timestamps、commit SHA 这类值会 stale。SessionStart hooks 在 resume 时会重新运行，可用于刷新上下文。<sup class="footnote-ref" id="fnref-cc-hooks-2"><a href="#fn-cc-hooks">13</a></sup></p>
+<p>因此动态 hidden context 应该带元数据：</p>
+<pre><code class="language-text">as_of: 2026-06-09T10:15:00+09:00
+source: ci_status_api
+ttl: 10m
+refresh: run `ci status --branch ...`
+scope: current_branch_only</code></pre>
+<p>不推荐：</p>
+<pre><code class="language-text">CI 失败了。</code></pre>
+<p>推荐：</p>
+<pre><code class="language-text">&lt;context name=&quot;ci_status&quot; as_of=&quot;2026-06-09T10:15:00+09:00&quot; ttl=&quot;10m&quot;&gt;
+当前 CI main 分支失败，失败 job 是 integration-tests。
+如果当前时间超过 ttl，先重新查询 CI，不要直接相信本段。
+&lt;/context&gt;</code></pre>
+<hr>
+<h3 id="14-mcp-skills-hooks">14. MCP、Skills、Hooks：上下文控制平面</h3>
+<p>Claude Code 的上下文管理不只靠 compact，还大量依赖扩展机制的设计。</p>
+<h4 id="14-1-mcp-tool-search-schema">14.1 MCP Tool Search：工具 schema 延迟加载</h4>
+<p>Claude Code MCP 文档说，Tool Search 默认启用：session start 只加载工具名和 server instructions，具体 tool definitions 延迟到 Claude 需要时再发现和加载；只有实际使用的工具进入 context。也可以用 threshold mode，在 tool schemas 能放入 context window 10% 以内时 upfront load，超出部分 defer。<sup class="footnote-ref" id="fnref-cc-mcp"><a href="#fn-cc-mcp">15</a></sup></p>
+<p>这解决的是“工具说明本身污染上下文”的问题。</p>
+<pre><code class="language-text">不好的做法：把所有 MCP tool schema 全塞进 system prompt
+更好的做法：只塞 tool names + server instructions，按需搜索工具定义</code></pre>
+<p>MCP 大输出也有预算机制：默认最大 25,000 tokens，超过阈值会警告；超过默认 persist-to-disk 阈值的结果会保存到磁盘，并在 conversation 中替换为 file reference。MCP server 作者还可以用 <code>_meta[&quot;anthropic/maxResultSizeChars&quot;]</code> 提高特定工具的阈值。<sup class="footnote-ref" id="fnref-cc-mcp-2"><a href="#fn-cc-mcp">15</a></sup></p>
+<h4 id="14-2-skills-description-body">14.2 Skills：description 常驻，body 按需加载</h4>
+<p>Claude Code skills 文档说，普通 session 中 skill descriptions 会加载进 context，让 Claude 知道有哪些技能；完整 skill content 只有在 invoked 时加载。大量参考资料应放入 supporting files，需要时再读取。<sup class="footnote-ref" id="fnref-cc-skills"><a href="#fn-cc-skills">16</a></sup></p>
+<pre><code class="language-text">skill name / description：作为路由索引，低成本常驻
+SKILL.md body：触发时进入 conversation
+reference.md / examples.md：按需读取
+script：执行，不一定加载全文</code></pre>
+<p>Skill descriptions 也有预算：所有 skill names 总是包含，但 descriptions 会按预算裁剪；预算大约按模型 context window 的 1% 扩展，溢出时较少使用的 skill descriptions 先被丢。<sup class="footnote-ref" id="fnref-cc-skills-2"><a href="#fn-cc-skills">16</a></sup></p>
+<h4 id="14-3-skills">14.3 Skills 也能注入动态状态</h4>
+<p>Skills 支持动态上下文注入，例如在 <code>SKILL.md</code> 中写：</p>
+<pre><code class="language-md">## Current changes
+!`git diff HEAD`</code></pre>
+<p>Claude Code 会先执行命令，把输出替换进 skill 内容，再让 Claude 看到最终 prompt。<sup class="footnote-ref" id="fnref-cc-skills-3"><a href="#fn-cc-skills">16</a></sup></p>
+<p>这也是“模型感知当前变化”的重要来源之一。</p>
+<h4 id="14-4-hooks">14.4 Hooks：注入、替换、阻止上下文流动</h4>
+<p>Hooks 是更底层的控制平面。官方文档说明：</p>
+<ul>
+  <li><p><code>additionalContext</code> 会被包装成 system reminder 注入上下文；</p></li>
+  <li><p><code>PostToolUse</code> 可以用 <code>updatedToolOutput</code> 替换工具输出，让 Claude 看到清洗后的结果；</p></li>
+  <li><p><code>PreCompact</code> 可以阻止 compaction；</p></li>
+  <li><p><code>PostCompact</code> 可以拿到 <code>compact_summary</code> 做外部同步。<sup class="footnote-ref" id="fnref-cc-hooks-3"><a href="#fn-cc-hooks">13</a></sup></p></li>
+</ul>
+<p>这意味着 agent runtime 不必让所有工具结果原样进入模型，而可以在工具输出进入 context 前进行：</p>
+<pre><code class="language-text">脱敏
+压缩
+替换
+增加约束说明
+阻止危险操作
+保存外部日志</code></pre>
+<hr>
+<h3 id="15-compaction">15. Compaction 后哪些内容保留，哪些会丢</h3>
+<p>官方 context window 文档对 compaction 后状态给了明确说明。<sup class="footnote-ref" id="fnref-cc-context-window-4"><a href="#fn-cc-context-window">4</a></sup></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>内容</th>
+      <th>Compaction 后状态</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>System prompt / output style</td>
+      <td>不变，不属于 message history</td>
+    </tr>
+    <tr>
+      <td>Project-root <code>CLAUDE.md</code> / unscoped rules</td>
+      <td>从磁盘重新注入</td>
+    </tr>
+    <tr>
+      <td>Auto memory</td>
+      <td>从磁盘重新注入</td>
+    </tr>
+    <tr>
+      <td>Path-scoped rules</td>
+      <td>丢失，直到再次读取匹配文件</td>
+    </tr>
+    <tr>
+      <td>Nested <code>CLAUDE.md</code></td>
+      <td>丢失，直到读取对应目录文件</td>
+    </tr>
+    <tr>
+      <td>Invoked skill bodies</td>
+      <td>预算内重注入，单 skill 5,000 tokens，总 25,000 tokens，旧的可能被丢</td>
+    </tr>
+    <tr>
+      <td>Hooks 代码本身</td>
+      <td>不属于 context；hook 在事件发生时运行</td>
+    </tr>
+    <tr>
+      <td>旧工具结果</td>
+      <td>可能被摘要、清除、引用化或丢弃</td>
+    </tr>
+    <tr>
+      <td>最近 tail messages</td>
+      <td>通常完整保留，用来维持近期操作连续性</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>这解释了为什么长期规则要放在稳定加载位置：</p>
+<pre><code class="language-text">必须长期有效 → project-root CLAUDE.md / unscoped rule / auto memory
+只对部分路径有效 → path-scoped rule，但要接受 compact 后延迟恢复
+复杂流程 → skill，而不是 CLAUDE.md 长篇 procedure
+动态状态 → hook reminder + TTL</code></pre>
+<hr>
+<h3 id="16">16. 风险与失败模式</h3>
+<h4 id="16-1">16.1 压缩一定有损</h4>
+<p>Auto-compact 是语义摘要，可能丢掉早期微妙约束、用户偏好、失败路径细节。官方 compaction 文档也列出限制：summary 使用同一模型；有 tools 时可能 summary 失败；compaction 是额外 sampling step，会增加计费和 rate limit 压力。<sup class="footnote-ref" id="fnref-anthropic-compaction-4"><a href="#fn-anthropic-compaction">8</a></sup></p>
+<h4 id="16-2-snip-microcompact">16.2 Snip / Microcompact 可能误删语义关键但结构很旧的信息</h4>
+<p>启发式清理无法保证知道“用户第一轮说过的那句话十轮后仍然关键”。关键约束应被提升到 memory、CLAUDE.md、plan 或 compact focus。</p>
+<h4 id="16-3-hidden-context">16.3 Hidden context 会过期</h4>
+<p>时间、branch、commit SHA、CI 状态、feature flag 这类动态事实如果被长期保留在 transcript 中，就会变成污染源。必须带 <code>as_of</code>、<code>ttl</code>、<code>source</code>、<code>refresh</code>，或通过 hook 每轮刷新。</p>
+<h4 id="16-4-subagent">16.4 Subagent 隔离可能造成全局不一致</h4>
+<p>Subagent 减少主上下文污染，但普通 subagent 默认不继承完整主对话；它可能缺少全局约束。对于必须共享大量背景的任务，fork 更合适，但隔离性较弱。</p>
+<h4 id="16-5-prompt-cache-trade-off">16.5 Prompt cache 与上下文质量存在 trade-off</h4>
+<p>为了保持 prefix cache，不应该永远维护巨大 append-only prompt。压缩会让 conversation cache 断一次，但长期能降低上下文污染和每轮成本。</p>
+<hr>
+<h3 id="17-coding-agent">17. 对自研 coding agent 的工程启发</h3>
+<p>如果要设计自己的 coding agent，可以从 Claude Code 中抽象出以下原则。</p>
+<h4 id="17-1-prompt-runtime-resource">17.1 上下文不是 prompt，而是 runtime resource</h4>
+<p>不要只做：</p>
+<pre><code class="language-text">system prompt + history + summarizer</code></pre>
+<p>而应该做：</p>
+<pre><code class="language-text">stable instruction layer
+project context layer
+conversation layer
+runtime reminder layer
+external memory layer
+tool result store
+subagent context store
+projected model view</code></pre>
+<h4 id="17-2">17.2 稳定内容和动态内容分开</h4>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>内容类型</th>
+      <th>推荐放置</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>长期规则</td>
+      <td>root memory / project instruction</td>
+    </tr>
+    <tr>
+      <td>项目事实</td>
+      <td>CLAUDE.md / AGENTS.md adapter</td>
+    </tr>
+    <tr>
+      <td>当前任务状态</td>
+      <td>TODO / plan / handoff</td>
+    </tr>
+    <tr>
+      <td>动态时间状态</td>
+      <td>hook reminder with TTL</td>
+    </tr>
+    <tr>
+      <td>大工具输出</td>
+      <td>持久化 + preview + pointer</td>
+    </tr>
+    <tr>
+      <td>复杂流程</td>
+      <td>skill / command</td>
+    </tr>
+    <tr>
+      <td>大规模探索</td>
+      <td>subagent</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<h4 id="17-3-llm">17.3 先便宜清理，再 LLM 总结</h4>
+<p>推荐管线：</p>
+<pre><code class="language-text">单工具结果限流 / 持久化
+→ 结构性垃圾回收
+→ 旧工具结果清理
+→ read-time projection
+→ 模型 summary
+→ prompt-too-long recovery</code></pre>
+<h4 id="17-4">17.4 大输出必须可引用、可重取、可验证</h4>
+<p>对每个被持久化的大输出，至少保留：</p>
+<pre><code class="language-text">tool name
+arguments
+timestamp
+cwd / git commit
+preview head/tail
+file reference
+content length
+是否可重跑</code></pre>
+<h4 id="17-5-subagent">17.5 Subagent 用于隔离污染，不只是并行加速</h4>
+<p>最适合 subagent 的任务：</p>
+<pre><code class="language-text">repo-wide search
+large log analysis
+multi-file dependency analysis
+parallel code review
+read-only research
+方案比较</code></pre>
+<p>不适合：</p>
+<pre><code class="language-text">小改动
+高频交互
+强共享上下文任务
+多个 agent 同时改同一片代码</code></pre>
+<h4 id="17-6-hidden-context-freshness-contract">17.6 Hidden context 要带 freshness contract</h4>
+<p>动态 system reminder 必须说明：</p>
+<pre><code class="language-text">这是什么
+什么时候生成
+什么时候过期
+来自哪里
+如何刷新
+旧版本是否被新版本 supersede</code></pre>
+<p>否则它迟早会变成上下文污染源。</p>
+<h4 id="17-7-prompt-cache">17.7 Prompt cache 可观测化</h4>
+<p>至少监控：</p>
+<pre><code class="language-text">cache_read_input_tokens
+cache_creation_input_tokens
+input_tokens after compaction
+original_input_tokens before editing
+compact frequency
+tool result persistence count
+subagent result token size</code></pre>
+<p>这样才能判断某次 compact / microcompact 是省钱还是制造 cache churn。</p>
+<hr>
+<h3 id="18">18. 最终结论</h3>
+<p>Claude Code 的上下文管理值得关注的不是某个 prompt，也不是某个 <code>/compact</code> 命令，而是它把上下文变成了 agent runtime 的一等公民。</p>
+<p>它的核心设计可以浓缩为：</p>
+<pre><code class="language-text">1. 动态组装 context，而不是静态大 prompt
+2. 稳定指令、项目记忆、会话历史、动态状态分层管理
+3. 大工具输出先外部化，active context 只保留 pointer/preview
+4. 旧工具结果和低价值历史用启发式清理
+5. 长历史用 projected view 折叠，而不是破坏底层 transcript
+6. 接近阈值时才用模型生成 structured summary
+7. compact 后重新构建当前视图，并重注入稳定 project context
+8. 用 subagent 隔离大规模探索噪声
+9. 用 hooks、MCP Tool Search、skills 控制上下文流入
+10. 用 prompt cache 分层设计降低重复处理成本</code></pre>
+<p>这套架构最像一个小型操作系统：</p>
+<pre><code class="language-text">context window = 运行内存
+file system / memory / transcript = 外部存储
+prompt cache = 前缀缓存
+snip / microcompact = 垃圾回收
+context collapse = 虚拟视图
+compact summary = checkpoint / handoff
+subagent = 子进程
+hooks = 中断与策略控制面</code></pre>
+<p>对于自研 agent 来说，真正应该学习的是这套分层工程思想：<strong>不要指望模型自己“记住一切”，而是设计一个能持续筛选、刷新、引用、压缩、隔离和重建上下文的 runtime。</strong></p>
+<hr>
+<h3 id="section-1">参考来源</h3>
+<ol class="article-footnotes">
+  <li id="fn-anthropic-context-engineering"><p>Anthropic Engineering, “Effective context engineering for AI agents”, 2025-09-29. https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents <a class="footnote-backref" href="#fnref-anthropic-context-engineering" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-prompt-caching"><p>Claude Code Docs, “How Claude Code uses prompt caching”. https://code.claude.com/docs/en/prompt-caching <a class="footnote-backref" href="#fnref-cc-prompt-caching" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-memory"><p>Claude Code Docs, “How Claude remembers your project”. https://code.claude.com/docs/en/memory <a class="footnote-backref" href="#fnref-cc-memory" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-context-window"><p>Claude Code Docs, “Explore the context window”. https://code.claude.com/docs/en/context-window <a class="footnote-backref" href="#fnref-cc-context-window" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-arxiv-five-layer"><p>Jiacheng Liu et al., “Dive into Claude Code: The Design Space of Today’s and Future AI Agent Systems”, arXiv:2604.14228v1, 2026-04-14. https://arxiv.org/html/2604.14228v1 <a class="footnote-backref" href="#fnref-arxiv-five-layer" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-changelog"><p>Claude Code Docs, “Claude Code changelog”. https://code.claude.com/docs/en/changelog <a class="footnote-backref" href="#fnref-cc-changelog" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-anthropic-context-editing"><p>Claude API Docs, “Context editing”. https://platform.claude.com/docs/en/build-with-claude/context-editing <a class="footnote-backref" href="#fnref-anthropic-context-editing" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-anthropic-compaction"><p>Claude API Docs, “Compaction”. https://platform.claude.com/docs/en/build-with-claude/compaction <a class="footnote-backref" href="#fnref-anthropic-compaction" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-subagents"><p>Claude Code Docs, “Create custom subagents”. https://code.claude.com/docs/en/sub-agents <a class="footnote-backref" href="#fnref-cc-subagents" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-codex-subagents"><p>OpenAI Developers, “Subagents – Codex”. https://developers.openai.com/codex/subagents <a class="footnote-backref" href="#fnref-codex-subagents" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-codex-subagent-concepts"><p>OpenAI Developers, “Subagents – Codex Concepts”. https://developers.openai.com/codex/concepts/subagents <a class="footnote-backref" href="#fnref-codex-subagent-concepts" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-arxiv-cache-dynamic"><p>同上，关于 <code>getSystemContext()</code>、<code>getUserContext()</code> memoization、动态变化和 feature flag 的分析。https://arxiv.org/html/2604.14228v1 <a class="footnote-backref" href="#fnref-arxiv-cache-dynamic" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-hooks"><p>Claude Code Docs, “Hooks reference”. https://code.claude.com/docs/en/hooks <a class="footnote-backref" href="#fnref-cc-hooks" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-codex-rollout-discussion"><p>OpenAI Codex GitHub Discussion, “What's pulled into context when a new session starts?” https://github.com/openai/codex/discussions/12668 <a class="footnote-backref" href="#fnref-codex-rollout-discussion" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-mcp"><p>Claude Code Docs, “Connect Claude Code to tools via MCP”. https://code.claude.com/docs/en/mcp <a class="footnote-backref" href="#fnref-cc-mcp" aria-label="返回正文">返回</a></p></li>
+  <li id="fn-cc-skills"><p>Claude Code Docs, “Extend Claude with skills”. https://code.claude.com/docs/en/skills <a class="footnote-backref" href="#fnref-cc-skills" aria-label="返回正文">返回</a></p></li>
+</ol>
+                    </div>
+
+                    <aside class="article-aside" aria-label="文章侧边栏">
+                        <h2>目录</h2>
+                        <nav class="article-toc" aria-label="文章目录">
+                            <a class="toc-level-3" href="#0">0. 摘要</a>
+                            <a class="toc-level-3" href="#1-context-engineering-coding-agent">1. 为什么 context engineering 是 coding agent 的核心问题</a>
+                            <a class="toc-level-3" href="#2-claude-code">2. Claude Code 的上下文分层</a>
+                            <a class="toc-level-4" href="#2-1">2.1 三层主结构</a>
+                            <a class="toc-level-4" href="#2-2">2.2 启动时自动进入上下文的内容</a>
+                            <a class="toc-level-4" href="#2-3">2.3 动态进入上下文的内容</a>
+                            <a class="toc-level-3" href="#3">3. 上下文生命周期</a>
+                            <a class="toc-level-3" href="#4">4. 五层压缩管线：从便宜清理到语义总结</a>
+                            <a class="toc-level-3" href="#5-budget-reduction">5. Budget Reduction：大输出外部化，而不是让大结果淹没窗口</a>
+                            <a class="toc-level-3" href="#6-snip">6. Snip：如何判断“无价值历史碎片”</a>
+                            <a class="toc-level-4" href="#6-1-snip">6.1 Snip 更像垃圾回收</a>
+                            <a class="toc-level-4" href="#6-2-llm-judge">6.2 为什么不适合 LLM judge</a>
+                            <a class="toc-level-3" href="#7-microcompact-cache-aware-trade-off">7. Microcompact：旧工具结果清理与 cache-aware trade-off</a>
+                            <a class="toc-level-3" href="#8-context-collapse">8. Context Collapse：读时投影，而不是破坏历史</a>
+                            <a class="toc-level-3" href="#9-auto-compact">9. Auto-compact：模型生成结构化交接摘要</a>
+                            <a class="toc-level-4" href="#9-1-summary">9.1 Summary 应保留什么</a>
+                            <a class="toc-level-4" href="#9-2-summary">9.2 Summary 使用哪个模型</a>
+                            <a class="toc-level-4" href="#9-3-maxlen">9.3 接近 maxLen 时的风险</a>
+                            <a class="toc-level-3" href="#10-prompt-cache">10. Prompt cache：为什么压缩会破坏部分缓存，但仍然值得</a>
+                            <a class="toc-level-4" href="#10-1-append-only">10.1 正常 append-only 对缓存友好</a>
+                            <a class="toc-level-4" href="#10-2-compact-conversation-layer">10.2 Compact 会重建 conversation layer</a>
+                            <a class="toc-level-4" href="#10-3-compact">10.3 Compact 不是无脑增加成本</a>
+                            <a class="toc-level-3" href="#11-memory-claude-md-project-context-system-prompt">11. Memory / CLAUDE.md：半稳定 project context，不是 system prompt</a>
+                            <a class="toc-level-4" href="#11-1-memory-system-prompt-cache">11.1 Memory 修改是否导致 system prompt cache 大面积失效？</a>
+                            <a class="toc-level-4" href="#11-2-memory">11.2 Memory 的工程建议</a>
+                            <a class="toc-level-3" href="#12-subagent">12. Subagent：把大规模探索隔离在主上下文之外</a>
+                            <a class="toc-level-4" href="#12-1-claude-code">12.1 Claude Code：默认模型自主调度，用户可强干预</a>
+                            <a class="toc-level-4" href="#12-2-isolated-subagent-vs-fork">12.2 Isolated subagent vs fork</a>
+                            <a class="toc-level-4" href="#12-3-codex-subagent">12.3 Codex：必须显式触发 subagent</a>
+                            <a class="toc-level-3" href="#13-hidden-context">13. 动态时间感知与 hidden context</a>
+                            <a class="toc-level-4" href="#13-1-claude-code">13.1 Claude Code 的时间/环境注入</a>
+                            <a class="toc-level-4" href="#13-2-codex-context">13.2 Codex 的环境 context</a>
+                            <a class="toc-level-4" href="#13-3-hidden-context">13.3 Hidden context 会过期，必须显式管理新鲜度</a>
+                            <a class="toc-level-3" href="#14-mcp-skills-hooks">14. MCP、Skills、Hooks：上下文控制平面</a>
+                            <a class="toc-level-4" href="#14-1-mcp-tool-search-schema">14.1 MCP Tool Search：工具 schema 延迟加载</a>
+                            <a class="toc-level-4" href="#14-2-skills-description-body">14.2 Skills：description 常驻，body 按需加载</a>
+                            <a class="toc-level-4" href="#14-3-skills">14.3 Skills 也能注入动态状态</a>
+                            <a class="toc-level-4" href="#14-4-hooks">14.4 Hooks：注入、替换、阻止上下文流动</a>
+                            <a class="toc-level-3" href="#15-compaction">15. Compaction 后哪些内容保留，哪些会丢</a>
+                            <a class="toc-level-3" href="#16">16. 风险与失败模式</a>
+                            <a class="toc-level-4" href="#16-1">16.1 压缩一定有损</a>
+                            <a class="toc-level-4" href="#16-2-snip-microcompact">16.2 Snip / Microcompact 可能误删语义关键但结构很旧的信息</a>
+                            <a class="toc-level-4" href="#16-3-hidden-context">16.3 Hidden context 会过期</a>
+                            <a class="toc-level-4" href="#16-4-subagent">16.4 Subagent 隔离可能造成全局不一致</a>
+                            <a class="toc-level-4" href="#16-5-prompt-cache-trade-off">16.5 Prompt cache 与上下文质量存在 trade-off</a>
+                            <a class="toc-level-3" href="#17-coding-agent">17. 对自研 coding agent 的工程启发</a>
+                            <a class="toc-level-4" href="#17-1-prompt-runtime-resource">17.1 上下文不是 prompt，而是 runtime resource</a>
+                            <a class="toc-level-4" href="#17-2">17.2 稳定内容和动态内容分开</a>
+                            <a class="toc-level-4" href="#17-3-llm">17.3 先便宜清理，再 LLM 总结</a>
+                            <a class="toc-level-4" href="#17-4">17.4 大输出必须可引用、可重取、可验证</a>
+                            <a class="toc-level-4" href="#17-5-subagent">17.5 Subagent 用于隔离污染，不只是并行加速</a>
+                            <a class="toc-level-4" href="#17-6-hidden-context-freshness-contract">17.6 Hidden context 要带 freshness contract</a>
+                            <a class="toc-level-4" href="#17-7-prompt-cache">17.7 Prompt cache 可观测化</a>
+                            <a class="toc-level-3" href="#18">18. 最终结论</a>
+                            <a class="toc-level-3" href="#section-1">参考来源</a>
+                        </nav>
+
+                        <div class="article-info">
+                            <h2>文章信息</h2>
+                            <span>分类：LLM Systems</span>
+                            <span>创建：2026-04-10</span>
+                            <span>更新：2026-04-10</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
+    <script src="../../assets/site.js?v=20260608-1"></script>
+</body>
+</html>

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="关于 confession 机制、confession RL、奖励模型、实验结论和扩展探索的技术笔记。">
     <title>Confessions：让大模型学会“三省吾身” | Sun Zhifei</title>
-    <link rel="stylesheet" href="../../assets/site.css?v=20260608-10">
+    <link rel="stylesheet" href="../../assets/site.css?v=20260609-1">
     <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
     <script>
         window.MathJax = {
@@ -183,6 +183,7 @@ type ObjectiveCompliance {
 <h2 id="results">实验及结论</h2>
 <h3 id="datasets">测试集</h3>
 <p>特意选了几类<strong>容易诱发模型不良行为</strong>的<strong>钓鱼执法</strong>类数据集，用来评测模型 confession 效果。</p>
+<div class="article-table-wrap">
 <table>
   <thead>
     <tr>
@@ -241,6 +242,7 @@ type ObjectiveCompliance {
     </tr>
   </tbody>
 </table>
+</div>
 <h3 id="necessity">结论一：confession 很有必要</h3>
 <div class="article-callout">
 <p>💡 在绝大多数钓鱼执法测试中，模型在常规回答时可能犯错、作弊、越权、出现幻觉，但在 <strong>confession 阶段往往能够准确指出自己错哪了</strong>，即 <strong>confession 显著提升了 LLM 对自身错误的觉察能力</strong>。</p>
