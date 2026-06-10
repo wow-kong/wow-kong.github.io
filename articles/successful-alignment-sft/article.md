@@ -178,7 +178,7 @@ DEITA一文中同样对多样性筛选策略进行了评估，具体包括Instag
 
 ---
 
-# 参考资料
+# 参考资料 {#references}
 
 [^1]: Llama 2: Open Foundation and Fine-Tuned Chat Models [https://arxiv.org/pdf/2307.09288](https://arxiv.org/pdf/2307.09288)
 [^2]: DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models [https://arxiv.org/pdf/2401.06066](https://arxiv.org/pdf/2401.06066)

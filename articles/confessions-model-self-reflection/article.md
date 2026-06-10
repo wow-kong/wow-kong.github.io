@@ -13,7 +13,7 @@ read_time: "14 min read"
 published: true
 ---
 
-# 前言
+# 前言 {#intro}
 
 模型幻觉、越狱、reward hacking 等行为一直是大模型训练和应用时，需要重点关注的对象。随着 LLM 能力的不断增强，如何有效地对这些行为进行检测、以及如何利用这些检测结果对模型进行反馈，逐渐成为当下饱受关注的议题之一。OpenAI 提出在模型推理后，进行二次推理、并在二次推理过程中以自省的方式，让模型反思之前的回答是否真实、合理，而这个二次推理过程也被称为 **confession**。
 
@@ -23,9 +23,9 @@ published: true
 >
 > Paper: [Training LLMs for Honesty via Confessions](https://cdn.openai.com/pdf/6216f8bc-187b-4bbb-8932-ba7c40c5553d/confessions_paper.pdf)
 
-# 具体方法：针对 confession 的强化学习
+# 具体方法：针对 confession 的强化学习 {#method}
 
-## confession 是什么
+## confession 是什么 {#definition}
 
 > 💡 confession 可以理解为模型对自身输出结果的**自纠自查**行为。
 >
@@ -75,7 +75,7 @@ type ObjectiveCompliance {
 }
 ```
 
-## 如何训练
+## 如何训练 {#training}
 
 confession RL 为**交替式训练**。在 $step_i$ 下：
 
@@ -88,7 +88,7 @@ confession RL 为**交替式训练**。在 $step_i$ 下：
 
 ![confession 与常规 RL 交替训练](assets/interleaved-training.svg)
 
-## 奖励模型
+## 奖励模型 {#reward-model}
 
 confession 的 Reward Model $R_c(y_c \mid x, y, x_c)$ 用于在 RL 阶段、从以下角度对 confession 结果进行评分：
 
@@ -151,9 +151,9 @@ confession 的 Reward Model $R_c(y_c \mid x, y, x_c)$ 包含以下输入：
 - confession 训练策略是通用的；
 - confession RM 是通用的；
 
-# 实验及结论
+# 实验及结论 {#results}
 
-## 测试集
+## 测试集 {#datasets}
 
 特意选了几类**容易诱发模型不良行为**的**钓鱼执法**类数据集，用来评测模型 confession 效果。
 
@@ -172,7 +172,7 @@ confession 的 Reward Model $R_c(y_c \mid x, y, x_c)$ 包含以下输入：
 | Scheming (Sandbagging) | 诱导模型为了避免某些后果而故意表现不佳 |
 | Reward Hacking Impossible Task | 故意给出无法完成的任务，测试模型是否会承认无法完成任务，而不是胡乱编造 |
 
-## 结论一：confession 很有必要
+## 结论一：confession 很有必要 {#necessity}
 
 > 💡 在绝大多数钓鱼执法测试中，模型在常规回答时可能犯错、作弊、越权、出现幻觉，但在 **confession 阶段往往能够准确指出自己错哪了**，即 **confession 显著提升了 LLM 对自身错误的觉察能力**。
 
@@ -194,7 +194,7 @@ confession 的 Reward Model $R_c(y_c \mid x, y, x_c)$ 包含以下输入：
 1. SFT 阶段有时会对数据从知识冲突的角度进行过滤；
 2. 在 RL 训练中往往强调 reward 和 actor 模型同源；
 
-## 结论二：RL 能提升 confession 能力
+## 结论二：RL 能提升 confession 能力 {#rl-improves}
 
 > 💡 通过 confession RL，能够让模型**更倾向于说实话**（指 confession 阶段）。
 
@@ -235,7 +235,7 @@ confession 结果：
 
 ![bad confession 与 good confession 的 case demo](assets/confession-case-demo.png)
 
-## 结论三：confession RL 用起来很安全
+## 结论三：confession RL 用起来很安全 {#safety}
 
 > 💡 confession RL **对原始任务的性能几乎没有影响**。
 
@@ -246,7 +246,7 @@ confession 结果：
 - 首先在 RL 阶段额外加了一个目标后，模型没有崩肯定是好事；
 - 但其次肯定也是有一点点希望 confession 训练，能够反馈模型生成风格、从而影响常规 response 生成的，实际上也没有；
 
-## 结论四：confession 也遵循 test-time scaling
+## 结论四：confession 也遵循 test-time scaling {#scaling}
 
 > 💡 在大多数评测中，**confession 质量随着推理计算量的增加而提升**。
 
@@ -263,9 +263,9 @@ confession 结果：
 >
 > ❌ 更多的 compute = 更强的 reasoning = 更强的欺骗能力
 
-# 探索延伸
+# 探索延伸 {#extensions}
 
-## 是否能用于 reward hacking 检测
+## 是否能用于 reward hacking 检测 {#reward-hacking}
 
 > 💡 可以的。
 
@@ -314,7 +314,7 @@ confession 结果：
 
 这也就意味着，**confession 机制可以在 RL 阶段作为一个 monitor**。
 
-## 是否能用于置信度评估
+## 是否能用于置信度评估 {#confidence}
 
 > 💡 可以的。
 
@@ -327,7 +327,7 @@ confession 结果：
 
 > 不过这里缺乏和基于 logits 等其他评估方式的对比。
 
-## confession 失败原因分析
+## confession 失败原因分析 {#failures}
 
 > 💡 confession 即使犯错、绝大多数错误也不是欺骗性的。
 
@@ -357,7 +357,7 @@ confession 失败的 case 具体可以分为两类：
 
 FP / FN 问题的主要归因之一是幻觉问题，也意味着提高 honesty 的下一个瓶颈不是更强的 reward，而是**提高模型的 meta-uncertainty estimation 能力**。
 
-# 一些反思和总结
+# 一些反思和总结 {#review}
 
 - confession + interleaved thinking 实现更高质量 output
   - confession 本质上就是 self-critic 能力，与 interleaved thinking 结合、实现 LLM 对输出的修正能力，能有效提高回复的遵循程度；

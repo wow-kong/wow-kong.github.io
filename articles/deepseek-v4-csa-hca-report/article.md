@@ -751,7 +751,7 @@ Sliding window：
 
 
 
-## 参考资料
+## 参考资料 {#references}
 
 [^report-eff]: DeepSeek-AI, *DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence*, Technical Report. 相关内容包括：1M context、CSA/HCA hybrid attention、V4-Pro 相比 V3.2 的 FLOPs 与 KV cache 对比。
 
