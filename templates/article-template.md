@@ -1,16 +1,16 @@
 ---
-layout: post
 title: "文章标题"
-date: 2026-06-04
-last_modified_at: 2026-06-04
+date: 2026-06-10
+created_at: 2026-06-10
+last_modified_at: 2026-06-10
 description: "用一句话说明这篇文章解决什么问题，以及读者能获得什么。"
-categories: ["NLP"]
+categories: ["LLM Systems"]
 tags: ["LLM", "Post-training", "Agent"]
-thumbnail: /assets/article-hero-forest.jpg
-hero_image: /assets/article-hero-forest.jpg
+thumbnail: assets/cover.jpg
+hero_image: assets/cover.jpg
+hero_image_layout:
 body_class:
 read_time: "6 min read"
-permalink: /articles/example-slug/
 published: false
 ---
 

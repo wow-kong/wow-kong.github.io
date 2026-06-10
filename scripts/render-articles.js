@@ -2,36 +2,11 @@
 
 const fs = require("fs");
 const path = require("path");
-const vm = require("vm");
+const { cssVersion, jsVersion } = require("./site-config");
 
 const ROOT = path.resolve(__dirname, "..");
 const ARTICLES_DIR = path.join(ROOT, "articles");
 const ARTICLE_DATA_FILE = path.join(ROOT, "assets", "articles.js");
-const CSS_VERSION = "20260609-2";
-
-const HEADING_IDS = new Map([
-  ["前言", "intro"],
-  ["具体方法：针对 confession 的强化学习", "method"],
-  ["confession 是什么", "definition"],
-  ["如何训练", "training"],
-  ["奖励模型", "reward-model"],
-  ["校准、防作弊与通用性", "calibration"],
-  ["Callback", "callback"],
-  ["实验及结论", "results"],
-  ["测试集", "datasets"],
-  ["结论一：confession 很有必要", "necessity"],
-  ["结论二：RL 能提升 confession 能力", "rl-improves"],
-  ["case demo", "case-demo"],
-  ["结论三：confession RL 用起来很安全", "safety"],
-  ["结论三：confession RL 用起来相对安全", "safety"],
-  ["结论四：confession 也遵循 test-time scaling", "scaling"],
-  ["探索延伸", "extensions"],
-  ["是否能用于 reward hacking 检测", "reward-hacking"],
-  ["是否能用于置信度评估", "confidence"],
-  ["confession 失败原因分析", "failures"],
-  ["一些反思和总结", "review"],
-  ["参考资料", "references"],
-]);
 
 const escapeHtml = (value = "") =>
   String(value)
@@ -356,28 +331,46 @@ const renderBlockquote = (quoteLines, context) => {
   return `<blockquote>\n${paragraphs}\n</blockquote>`;
 };
 
-const getHeadingId = (text, context) => {
-  if (HEADING_IDS.has(text)) {
-    return HEADING_IDS.get(text);
+const parseExplicitHeadingId = (rawText) => {
+  const match = rawText.match(/\s+\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}$/);
+
+  if (!match) {
+    return { text: rawText, explicitId: "" };
+  }
+
+  return {
+    text: rawText.slice(0, match.index).trim(),
+    explicitId: match[1],
+  };
+};
+
+const reserveHeadingId = (id, context) => {
+  const count = context.headingIdCounts.get(id) || 0;
+  context.headingIdCounts.set(id, count + 1);
+  return count ? `${id}-${count + 1}` : id;
+};
+
+const getHeadingId = (text, context, explicitId = "") => {
+  if (explicitId) {
+    return reserveHeadingId(explicitId, context);
   }
 
   const ascii = slugifyClass(text);
   if (ascii) {
-    const count = context.headingIdCounts.get(ascii) || 0;
-    context.headingIdCounts.set(ascii, count + 1);
-    return count ? `${ascii}-${count + 1}` : ascii;
+    return reserveHeadingId(ascii, context);
   }
 
   context.sectionCount += 1;
-  return `section-${context.sectionCount}`;
+  return reserveHeadingId(`section-${context.sectionCount}`, context);
 };
 
 const renderHeading = (line, context) => {
   const match = line.trim().match(/^(#{1,6})\s+(.+)$/);
   const markdownLevel = match[1].length;
-  const text = match[2].trim();
+  const parsed = parseExplicitHeadingId(match[2].trim());
+  const text = parsed.text;
   const htmlLevel = Math.min(markdownLevel + 1, 6);
-  const id = getHeadingId(text, context);
+  const id = getHeadingId(text, context, parsed.explicitId);
   context.headings.push({ id, text, level: htmlLevel });
   context.hasRenderedContent = true;
   return `<h${htmlLevel} id="${escapeAttr(id)}">${renderInline(text)}</h${htmlLevel}>`;
@@ -680,7 +673,7 @@ const renderArticlePage = ({ slug, frontmatter, contentHtml, headings }) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="${escapeAttr(description)}">
     <title>${escapeHtml(title)} | Sun Zhifei</title>
-    <link rel="stylesheet" href="../../assets/site.css?v=${CSS_VERSION}">
+    <link rel="stylesheet" href="../../assets/site.css?v=${cssVersion}">
     <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
     <script>
         window.MathJax = {
@@ -747,32 +740,24 @@ ${formatToc(headings)}
             <span>Built for GitHub Pages.</span>
         </div>
     </footer>
-    <script src="../../assets/site.js?v=20260608-1"></script>
+    <script src="../../assets/site.js?v=${jsVersion}"></script>
 </body>
 </html>
 `;
 };
 
-const loadExistingArticles = () => {
-  if (!fs.existsSync(ARTICLE_DATA_FILE)) {
-    return [];
-  }
+const getSortedArticleData = (generatedArticles) =>
+  generatedArticles.slice().sort(
+    (current, next) => Date.parse(next.date || "") - Date.parse(current.date || "")
+  );
 
-  const code = fs.readFileSync(ARTICLE_DATA_FILE, "utf8");
-  const context = { window: {} };
-  vm.createContext(context);
-  vm.runInContext(code, context);
-  return Array.isArray(context.window.SZF_ARTICLES) ? context.window.SZF_ARTICLES : [];
+const getArticleDataContent = (generatedArticles) => {
+  const json = JSON.stringify(getSortedArticleData(generatedArticles), null, 4);
+  return `window.SZF_ARTICLES = ${json};\n`;
 };
 
 const writeArticleData = (generatedArticles) => {
-  const generatedHrefs = new Set(generatedArticles.map((article) => article.href));
-  const legacyArticles = loadExistingArticles().filter((article) => !generatedHrefs.has(article.href));
-  const articles = [...generatedArticles, ...legacyArticles].sort(
-    (current, next) => Date.parse(next.date || "") - Date.parse(current.date || "")
-  );
-  const json = JSON.stringify(articles, null, 4);
-  fs.writeFileSync(ARTICLE_DATA_FILE, `window.SZF_ARTICLES = ${json};\n`);
+  fs.writeFileSync(ARTICLE_DATA_FILE, getArticleDataContent(generatedArticles));
 };
 
 const discoverMarkdownArticles = () =>
@@ -786,8 +771,9 @@ const discoverMarkdownArticles = () =>
     }))
     .filter((article) => fs.existsSync(article.markdownPath));
 
-const renderArticles = () => {
+const buildArticleOutputs = () => {
   const generatedArticles = [];
+  const articlePages = [];
 
   discoverMarkdownArticles().forEach(({ slug, markdownPath, outputPath }) => {
     const source = fs.readFileSync(markdownPath, "utf8");
@@ -800,7 +786,14 @@ const renderArticles = () => {
       headings: rendered.headings,
     });
 
-    fs.writeFileSync(outputPath, html);
+    articlePages.push({
+      slug,
+      markdownPath,
+      outputPath,
+      html,
+      frontmatter,
+      headings: rendered.headings,
+    });
 
     if (frontmatter.published !== false) {
       const category = Array.isArray(frontmatter.categories)
@@ -819,8 +812,49 @@ const renderArticles = () => {
     }
   });
 
-  writeArticleData(generatedArticles);
-  console.log(`Rendered ${generatedArticles.length} markdown article(s).`);
+  return {
+    articlePages,
+    generatedArticles,
+    articleDataContent: getArticleDataContent(generatedArticles),
+  };
 };
 
-renderArticles();
+const writeArticleOutputs = ({ articlePages, generatedArticles }) => {
+  articlePages.forEach(({ outputPath, html }) => {
+    fs.writeFileSync(outputPath, html);
+  });
+
+  writeArticleData(generatedArticles);
+};
+
+const renderArticles = ({ write = true, log = true } = {}) => {
+  const outputs = buildArticleOutputs();
+
+  if (write) {
+    writeArticleOutputs(outputs);
+  }
+
+  if (log) {
+    console.log(`Rendered ${outputs.generatedArticles.length} markdown article(s).`);
+  }
+
+  return outputs;
+};
+
+module.exports = {
+  ROOT,
+  ARTICLES_DIR,
+  ARTICLE_DATA_FILE,
+  buildArticleOutputs,
+  discoverMarkdownArticles,
+  getArticleDataContent,
+  normalizeArticleHeroImage,
+  normalizeListImage,
+  parseFrontmatter,
+  renderArticles,
+  renderMarkdown,
+};
+
+if (require.main === module) {
+  renderArticles();
+}
