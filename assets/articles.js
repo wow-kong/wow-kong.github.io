@@ -64,6 +64,22 @@ window.SZF_ARTICLES = [
         ]
     },
     {
+        "title": "GRPO 算法介绍：从组内相对优势到 LLM 后训练实践",
+        "description": "系统梳理 GRPO 的动机、目标函数、token 级更新机制、相对 PPO 的差异，以及在 LLM 后训练中的适用边界与实践流程。",
+        "date": "2025-05-10",
+        "category": "LLM Alignment",
+        "readTime": "18 min read",
+        "href": "articles/grpo-algorithm-intro/",
+        "image": "articles/grpo-algorithm-intro/assets/grpo-algorithm-cover.png",
+        "tags": [
+            "LLM",
+            "GRPO",
+            "Reinforcement Learning",
+            "Post-training",
+            "RLHF"
+        ]
+    },
+    {
         "title": "RoPE 公式推导与长度外推",
         "description": "从旋转位置编码的公式推导出发，梳理 RoPE 的实现方式、远程衰减特性，以及 PI、NTK-aware、NTK-by-parts、YARN 等长度外推策略。",
         "date": "2024-06-16",
