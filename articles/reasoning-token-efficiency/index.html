@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="系统梳理 reasoning token efficiency 的问题定义、无训练压缩、预算感知训练、长度约束 RL，以及 reasoning unit 剪枝路线。">
+    <title>Reasoning Token Efficiency：从“想得更久”到“想得刚好” | Sun Zhifei</title>
+    <link rel="stylesheet" href="../../assets/site.css?v=20260701-1">
+    <link rel="icon" href="../../assets/favicon.svg" type="image/svg+xml">
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [["\\(", "\\)"], ["$", "$"]],
+                displayMath: [["\\[", "\\]"], ["$$", "$$"]]
+            },
+            options: {
+                skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+            }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body class="reasoning-token-efficiency-article" data-site-root="../../" data-active-section="articles">
+    <header class="site-header" data-site-header></header>
+
+    <main>
+        <article>
+            <section class="article-hero" aria-label="文章标题区" style="--article-hero-image: url(&quot;../articles/reasoning-token-efficiency/assets/rte-hero-cover.png&quot;)">
+
+                <div class="hero-inner">
+                    <p class="eyebrow">Technical Notes · LLM Systems</p>
+                    <h1>Reasoning Token Efficiency：从“想得更久”到“想得刚好”</h1>
+                    <p class="hero-copy">系统梳理 reasoning token efficiency 的问题定义、无训练压缩、预算感知训练、长度约束 RL，以及 reasoning unit 剪枝路线。</p>
+                    <div class="article-meta" aria-label="文章元信息">
+                        <span>2026-07-01</span>
+                        <span>LLM Systems</span>
+                        <span>26 min read</span>
+                    </div>
+                    <div class="tags" aria-label="文章标签">
+                        <span>Reasoning</span>
+                        <span>Token Efficiency</span>
+                        <span>Test-time Compute</span>
+                        <span>Post-training</span>
+                        <span>LLM</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="article-shell">
+                <div class="container article-layout">
+                    <div class="article-content">
+<p class="article-lead">本文围绕 Reasoning Token Efficiency（RTE）展开：当 reasoning model 把更多计算搬到生成阶段后，如何让 test-time compute 从“越长越好”变成可分配、可验证、可回收的系统资源。</p>
+<h3 id="rte">背景：RTE 要解决什么问题</h3>
+<div class="article-callout">
+<p>💡 RTE 要解决的未必是“让模型少写一点”，而是当 reasoning model 把更多计算搬到生成时之后，如何把 <strong>test-time compute</strong> 变成可分配、可验证、可回收的系统资源。</p>
+</div>
+<div class="article-columns" data-column-count="3">
+  <div class="article-column">
+<p><strong>成本和延迟</strong></p>
+<p>同样的用户问题，不应默认消耗同样多的 reasoning token。简单问题需要快速返回，复杂问题才值得保留搜索空间。</p>
+  </div>
+  <div class="article-column">
+<p><strong>正确性和事实风险</strong></p>
+<p>短不是目标。省掉必要验证会伤害正确性；生成出的中间事实如果不可验证，也可能放大最终幻觉。</p>
+  </div>
+  <div class="article-column">
+<p><strong>系统可控性</strong></p>
+<p>线上系统需要知道什么时候多想、什么时候少想、实际花了多少、是否换来了业务收益，而不是只看平均输出长度。</p>
+  </div>
+</div>
+<hr>
+<h3 id="1-reasoning-token">1. reasoning token 存在冗余</h3>
+<div class="article-callout">
+<p>💡 <strong>本节重点：</strong>不要先问“如何变短”，先问 <strong>token 的收益来自哪里</strong>。三篇论文分别对应：事实激活、过度思考、问题级长度阈值。</p>
+</div>
+<h4 id="1-1-thinking-to-recall">1.1 Thinking to Recall：长思考有时是在做参数知识自检索</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2603.09906">Thinking to Recall: How Reasoning Unlocks Parametric Knowledge in LLMs</a>（arXiv 2026；<a href="https://arxiv.org/pdf/2603.09906">PDF</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 单跳事实问答本来不需要复杂推理，为什么打开 reasoning mode 仍然更容易答对？不是“模型会了逻辑推导”，而是两条更具体的通道：<strong>computational buffer</strong> 和 <strong>factual priming</strong>。</p>
+</div>
+<p><strong>不是复杂推理，而是事实能不能被取出来</strong></p>
+<p>Thinking to Recall 刻意把实验放在 <strong>closed-book factual QA</strong> 上：答案不在上下文里，模型只能从参数知识中回忆。这个设计排除了“题目需要多步分解”这个常见解释，把问题压到更本质的一层：同一套参数，为什么 reasoning ON 比 reasoning OFF 更容易把事实吐出来？</p>
+<p>作者使用可以切换 reasoning ON/OFF 的 hybrid models，并用 <code>pass@k</code> 观察 capability boundary。</p>
+<p><strong>两条机制：多走几步，以及先带出相关事实</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>机制一：computational buffer</strong></p>
+<p>把真实 reasoning trace 替换成等长 dummy token，例如重复 <code>Let me think.</code>，模型仍然比 reasoning OFF 更容易答对。这说明中间 token 即使没有语义，也可能通过额外 autoregressive steps 提供内部计算空间。</p>
+<p><strong>关键数字：</strong>Gemini-2.5-Flash 上，ON Dummy 让 SimpleQA-Verified pass@1 从 <strong>0.206</strong> 到 <strong>0.262</strong>，EntityQuestions 从 <strong>0.457</strong> 到 <strong>0.554</strong>。</p>
+<p><strong>边界：</strong>buffer 不是越长越好。dummy 长度到约 <strong>2048 tokens</strong> 仍有收益，再到 4096/8192/16384 后效果下降。</p>
+  </div>
+  <div class="article-column">
+<p><strong>机制二：factual priming</strong></p>
+<p>如果纯计算只能解释一部分，剩下的收益来自哪里？reasoning trace 在这些单跳事实题上很少真的写多步推导，更多是列候选答案、回忆相关事实，或者描述搜索计划。虽然 evaluation 中 search 是关闭的，但模型会在文字上模拟“我应该找哪些相关事实”。</p>
+<p>作者把这个过程叫 <strong>generative self-retrieval</strong>：模型不访问外部数据库，而是先从参数里生成一些邻近事实，再用这些事实桥接到目标答案。</p>
+<p><strong>实验结论：</strong>实验验证抽出的相关事实本身对召回答案有因果作用。虽然没有直接把答案塞回上下文，但让模型更容易从内部知识中找到目标答案。</p>
+  </div>
+</div>
+<figure class="article-figure">
+  <img src="assets/fig01-thinking-to-recall.gif" alt="Thinking to Recall 中 reasoning trace 激活事实回忆的示意图">
+  <figcaption>Thinking to Recall 中 reasoning trace 激活事实回忆的示意图</figcaption>
+</figure>
+<p><strong>风险：factual priming 也会放大幻觉</strong></p>
+<p>factual priming 的风险来自同一个机制：中间事实会条件化最终答案。如果 trace 里生成的相关事实是错的，它不只是“解释里有错误”，还可能给最终答案搭出一条更自信的错误路径。</p>
+<div class="article-callout">
+<p>💡 <strong>风险证据：</strong>SimpleQA-Verified 中 clean traces 的最终答对率是 <strong>41.4%</strong>，hallucinated traces 是 <strong>26.4%</strong>；EntityQuestions 中 clean traces 是 <strong>71.1%</strong>，hallucinated traces 是 <strong>32.2%</strong>。所以 RTE 不能只问“要不要多想”，还要问“多想出来的事实能不能被验证”。</p>
+</div>
+<figure class="article-figure">
+  <img src="assets/fig02-hallucinated-facts-risk.png" alt="图 1：clean vs hallucinated reasoning trace 对最终答案的影响（截自 Thinking to Recall 原论文）">
+  <figcaption>图 1：clean vs hallucinated reasoning trace 对最终答案的影响（截自 Thinking to Recall 原论文）</figcaption>
+</figure>
+<blockquote>
+<p><strong>边界：</strong>这篇论文主要研究 closed-book factual recall；ON/OFF 观察覆盖 Gemini/Qwen，机制控制实验主要基于 Gemini-2.5-Flash。clean/hallucinated 数字比较的是 trace 分组后的最终答对率，不是事实本身的正确率，也不等价于每条错误事实都必然导致最终错误。它不应直接外推到数学证明、代码生成或 agent planning</p>
+</blockquote>
+<h4 id="1-2-do-not-think-that-much">1.2 Do NOT Think That Much：长思考也可能只是低效重复</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2412.21187">Do NOT Think That Much for 2+3=? On the Overthinking of o1-Like LLMs</a>（arXiv 2025；<a href="https://arxiv.org/pdf/2412.21187">PDF</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 当答案已经出现，后续 reasoning token 还在贡献什么？这篇论文的价值不是简单批评长 CoT，而是把“长思考是否有用”拆成两个可测量维度：答案是否已经足够，以及后续策略是否真的变新。</p>
+</div>
+<p><strong>test-time compute 存在冗余</strong></p>
+<p>o1-like 模型擅长复杂推理，但它们会把强推理模式泛化到简单题上。即使面对 <code>2 + 3</code> 这类问题，模型也可能多次给出同一个答案、反复验证、再换一种说法解释。</p>
+<p>这不是说长 CoT 没价值，而是提醒我们：reasoning token 是一种资源。对复杂题，它可能带来搜索、回溯和验证；对简单题，它可能只是在答案已经收敛之后继续消费成本和延迟。</p>
+<p><strong>两个指标：先看答案是否已经出现，再看策略是否真的变新</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>Outcome efficiency</strong></p>
+<p>先把输出切成多个 solution round；如果第一次正确答案已经出现，后面继续生成的 token 就不再改变“是否答对”。</p>
+<p><strong>识别的浪费：</strong>答对之后仍继续验证、改写或重复同一答案。</p>
+  </div>
+  <div class="article-column">
+<p><strong>Process efficiency</strong></p>
+<p>再看后续 solution 是否引入新的 reasoning strategy。只有第一次出现的新策略，才算有效探索。</p>
+<p><strong>识别的浪费：</strong>表面上多轮推理，实际上只是同一策略的重复包装。</p>
+  </div>
+</div>
+<p><strong>强模型高准确，也可能低效率</strong></p>
+<p>论文的关键现象是：QwQ-32B-Preview 和 DeepSeek-R1 准确率很高，但平均 solution 数和 token 数显著增加，效率指标变低。只看 accuracy，会把“花很多 token 答对”误判成纯粹的推理能力提升。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>数据集</th>
+      <th>模型</th>
+      <th>Accuracy</th>
+      <th>#Solution</th>
+      <th>#Token</th>
+      <th>Outcome efficiency</th>
+      <th>Process efficiency</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>ASDIV</td>
+      <td>QwQ-32B-Preview</td>
+      <td>96.9</td>
+      <td>3.5</td>
+      <td>741.8</td>
+      <td>41.9%</td>
+      <td>66.5%</td>
+    </tr>
+    <tr>
+      <td>ASDIV</td>
+      <td>DeepSeek-R1</td>
+      <td>97.1</td>
+      <td>4.5</td>
+      <td>845.0</td>
+      <td>45.9%</td>
+      <td>64.3%</td>
+    </tr>
+    <tr>
+      <td>MATH500</td>
+      <td>QwQ-32B-Preview</td>
+      <td>93.0</td>
+      <td>3.2</td>
+      <td>2407.9</td>
+      <td>52.3%</td>
+      <td>71.2%</td>
+    </tr>
+    <tr>
+      <td>MATH500</td>
+      <td>DeepSeek-R1</td>
+      <td>96.4</td>
+      <td>4.3</td>
+      <td>2704.3</td>
+      <td>51.0%</td>
+      <td>66.2%</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>缓解路线：不是直接截断，而是训练</strong>短正确<strong>偏好</strong></p>
+<ol>
+  <li><p><strong>先过滤正确性：</strong>每题采样多个 responses，丢弃错误样本，避免把“短但错”当成正例。</p></li>
+  <li><p><strong>再比较长度偏好：</strong>在正确样本里比较 shortest、longest、greedy，用 SimPO 等方法训练短正确偏好。</p></li>
+  <li><p><strong>最后保留最低限度反思：</strong>FCS 只保留首次正确 solution，FCS+Reflection 额外保留一轮反思，降低难题早停风险。</p></li>
+</ol>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>数据集</th>
+      <th>原 QwQ</th>
+      <th>SimPO_FCS+Reflection</th>
+      <th>Token 变化</th>
+      <th>实验读法</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>ASDIV</strong></td>
+      <td>96.9 acc / 741.8 tokens</td>
+      <td>96.8 acc / 381.6 tokens</td>
+      <td>-48.6%</td>
+      <td>简单数学题上，压掉重复 solution 基本不伤准确率。</td>
+    </tr>
+    <tr>
+      <td><strong>GSM8K</strong></td>
+      <td>94.8 / 772.8</td>
+      <td>96.0 / 416.6</td>
+      <td>-46.1%</td>
+      <td>不仅更短，准确率还略升，说明原输出里确实有低效反复。</td>
+    </tr>
+    <tr>
+      <td><strong>MATH500</strong></td>
+      <td>93.0 / 2407.9</td>
+      <td>92.8 / 1330.7</td>
+      <td>-44.7%</td>
+      <td>token 约减半，准确率只低 0.2；这是最能支撑方法有效性的结果。</td>
+    </tr>
+    <tr>
+      <td><strong>GPQA</strong></td>
+      <td>59.6 / 3228.4</td>
+      <td>59.1 / 2085.7</td>
+      <td>-35.4%</td>
+      <td>知识推理任务也能降 token，但收益小于简单数学。</td>
+    </tr>
+    <tr>
+      <td><strong>AIME24</strong></td>
+      <td>46.7 / 9480.9</td>
+      <td>43.3 / 5154.5</td>
+      <td>-45.6%</td>
+      <td>难题掉分明显，说明不能把 FCS 类早停直接套到高难任务。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<h4 id="1-3-token-complexity">1.3 Token Complexity：用问题粒度理解“刚好够用”</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2503.01141">How Well do LLMs Compress Their Own Chain-of-Thought? A Token Complexity Approach</a>（arXiv 2025；<a href="https://arxiv.org/pdf/2503.01141">PDF</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 如果 1.2 告诉我们“有些长思考是浪费”，那这一节进一步问：每道题到底需要多少 reasoning token 才刚好够用？</p>
+</div>
+<p><strong>Universal trade-off：形式不同，长度决定大部分表现</strong></p>
+<p>很多压缩 prompt 看起来差异很大：限制 token、限制 word、只写数字、去掉空格、换成中文、改成 bullet。但论文发现，在 reasonably informative CoT 范围内，许多方法最后都沿着相近的 accuracy-token trade-off curve 移动。</p>
+<p>作者把每个 prompt 的平均输出 token 数和准确率画在同一张图上。结果发现 OnlyNumbers、NoProperGrammar、BulletPoints、ChineseCoT、TokenLimit、WordLimit 等看起来差异很大，但许多点都落在接近同一条 trade-off curve 的位置。</p>
+<figure class="article-figure">
+  <img src="assets/fig03-universal-tradeoff.png" alt="图 3：31 类 CoT 压缩 prompt 的 accuracy-token trade-off（截自 Token Complexity 原论文）">
+  <figcaption>图 3：31 类 CoT 压缩 prompt 的 accuracy-token trade-off（截自 Token Complexity 原论文）</figcaption>
+</figure>
+<p>这说明一个朴素但重要的结论：在这些 prompt 中，改变 CoT 的“样式”没有想象中重要。真正主导表现的是模型是否获得了足够 token 来完成这道题所需的推理。</p>
+<blockquote>
+<p>论文也给出例外：更弱模型或更难数据集上，一些 prompt 会落在 trade-off curve 下方。这说明“长度主导”不是无条件规律，而是在 reasonably informative CoT 里更明显。</p>
+</blockquote>
+<p><strong>Token complexity：每道题有一个最小推理长度</strong></p>
+<blockquote>
+<p>论文的核心假设是：
+对问题 <span class="math">\(i\)</span> 和模型 <span class="math">\(\pi\)</span>，存在阈值 <span class="math">\(\tau_i\)</span>。
+如果某个 CoT 的 <span class="math">\(\mathrm{token\_length}\)</span> &gt;= <span class="math">\(\tau_i\)</span>，模型答对；
+如果 <span class="math">\(\mathrm{token\_length}\)</span> &lt; <span class="math">\(\tau_i\)</span>，模型答错。</p>
+</blockquote>
+<p><strong>方法流程：用 31 类 prompt 反推问题级阈值</strong></p>
+<ol>
+  <li><p>为同一问题和同一模型生成 <strong>31 类不同长度的 CoT</strong>。</p></li>
+  <li><p>记录每个输出的 token length 和 correct / incorrect。</p></li>
+  <li><p>为每题寻找最能区分 correct / incorrect 的 token threshold。</p></li>
+  <li><p>用 threshold classifier 预测单次输出是否正确，并预测整体 benchmark accuracy。</p></li>
+  <li><p>用 token complexity 估算 oracle upper bound，判断简单 prompt 压缩离上界多远。</p></li>
+</ol>
+<p><strong>结果结论：简单 prompt 有用，但离上界很远</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>发现</th>
+      <th>数字</th>
+      <th>含义</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>阈值分类器有效</strong></td>
+      <td>GSM8K 上 GPT-4o / Claude 3.5 Sonnet 约 97%；多数 MATH-500 设置约 90%</td>
+      <td>很多题确实呈现问题级 token 阈值行为。</td>
+    </tr>
+    <tr>
+      <td><strong>accuracy 预测误差小</strong></td>
+      <td>benchmark-level 相对误差通常在 6% 以内</td>
+      <td>token complexity 可以作为离线评估坐标。</td>
+    </tr>
+    <tr>
+      <td><strong>prompt 压缩离上界远</strong></td>
+      <td>BeConcise 常见 1.2-1.4x；oracle upper bound 可达 3.2-11.2x</td>
+      <td>简单 prompt 不是 CoT 压缩终点。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>部分总结</strong></p>
+<ol>
+  <li><p>实验主要限于数学推理。MATH-500、GSM8K、MMLU-Pro Math 都适合自动判分，但部分开放式场景成功率更难定义于评估，token complexity 阈值<strong>或许存在、但难以预估</strong>。</p></li>
+  <li><p>阈值假设不是语义定理。一个 100-token 的无意义输出不可能因为长度足够就答对。作者也明确限定在 reasonably informative CoT 范围内。</p></li>
+  <li><p>prompt 集合固定为 31 类。更强的 fine-tuning、iterative refinement、latent reasoning 可能会改变 frontier。</p></li>
+</ol>
+<hr>
+<h3 id="2-prompt">2. 无需训练：先用 prompt 和预算估计减少无效长思考</h3>
+<div class="article-callout">
+<p>💡 <strong>本节重点：</strong>先不改模型，用低成本手段判断是否真的需要长 reasoning：CoD 压掉完整句式，budget router 估计问题级预算，TALE-EP 检查“把预算写进 prompt”是否真的省 token；TALE-PT 则作为通向训练层的桥。</p>
+</div>
+<h4 id="2-1-chain-of-draft-cot-cot">2.1 Chain of Draft：无训练地把完整 CoT 改成草稿式 CoT</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2502.18600">Chain of Draft: Thinking Faster by Writing Less</a>（arXiv 2025；<a href="https://arxiv.org/pdf/2502.18600">PDF</a>；<a href="https://github.com/sileix/chain-of-draft">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 CoD 的出发点很直接：CoT 有效、但经常太啰嗦。CoD 就是让模型仍然 step by step，但每个思考步骤只保留最小草稿，并把每步限制在最多 5 个词。</p>
+</div>
+<p><strong>问题框架：CoT 的冗余像“把草稿写成讲义”</strong></p>
+<p>标准 CoT 往往会先复述题目，再说明要用什么公式，再计算，再验证答案。CoD 质疑的不是“要不要中间过程”，而是“中间过程有没有必要写成完整自然语言解释”。</p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>完整 CoT 的问题</strong></p>
+<p>自然语言包装太多：例如“Let us solve step by step”“we need to find the difference”“therefore the answer is...”。这些句子提高可读性，但不一定增加解题状态。</p>
+  </div>
+  <div class="article-column">
+<p><strong>CoD 的核心直觉</strong></p>
+<p>保留变量、关键操作和最终答案，删掉讲义式解释。它不是 direct answer，而是把完整解释换成更接近人类草稿的内部表示。</p>
+  </div>
+</div>
+<pre><code>20 - x = 12; x = 20 - 12 = 8. #### 8</code></pre>
+<p><strong>怎么解决：一个 prompt 约束 + few-shot 风格迁移</strong></p>
+<p>CoD 只改 prompt：要求模型 step by step，但每一步只写 minimum draft，并在 <code>####</code> 后输出最终答案。论文里的 5-word 限制不是程序硬约束，只是 general guideline。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>方法</th>
+      <th>系统指令含义</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Standard</strong></td>
+      <td>直接回答，不写解释或推理。</td>
+    </tr>
+    <tr>
+      <td><strong>CoT</strong></td>
+      <td>Think step by step，并在 <code>####</code> 后返回答案。</td>
+    </tr>
+    <tr>
+      <td><strong>CoD</strong></td>
+      <td>Think step by step，但每个 thinking step 只保留最小草稿，最多约 5 words，并在 <code>####</code> 后返回答案。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 <strong>关键点：</strong>真正让模型学会 CoD 风格的不是一句“write briefly”，而是 prompt 加作者手写的 few-shot CoD exemplars。换任务、换语言、换领域时，需要重新设计草稿示例，并检查模型是否偏离风格。</p>
+</div>
+<p><strong>实验结论：大模型 few-shot 下，CoD 是很强的低成本 baseline</strong></p>
+<p>论文主实验在 GPT-4o 和 Claude 3.5 Sonnet 上评测 arithmetic、commonsense 和 symbolic reasoning。CoD 不是无损压缩，但在强模型和结构化任务上，它经常能用很低成本换来接近 CoT 的效果。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>设置</th>
+      <th>CoT</th>
+      <th>CoD</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>GPT-4o / GSM8K</strong></td>
+      <td>95.4% / 205.1 tokens / 4.2s</td>
+      <td><strong>91.1% / 43.9 tokens / 1.0s</strong></td>
+      <td>准确率掉约 4 点，但输出 token 降到约五分之一，延迟也明显下降。</td>
+    </tr>
+    <tr>
+      <td><strong>Claude 3.5 / Sports</strong></td>
+      <td>93.2% / 189.4 tokens</td>
+      <td><strong>97.3% / 14.3 tokens</strong></td>
+      <td>结构清晰任务上，短草稿可能同时更短、更准。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 CoD 解决的是“能不能先把 CoT 写短”，但它没有解决“哪些问题可以写短”。前面的 Token Complexity 给出的关键启发是：不同问题需要的最小有效 reasoning token 不同，所以无训练阶段真正要进入的是预算估计：先判断这题该不该长思考，再把预算写进 prompt。</p>
+</div>
+<h4 id="2-2-tale">2.2 TALE：预算不能盲目写小</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2412.18547">Token-Budget-Aware LLM Reasoning</a>（ACL 2025 Findings / arXiv 2024；<a href="https://arxiv.org/pdf/2412.18547">PDF</a>；<a href="https://github.com/GeniusHTX/TALE">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 预算不是越小越好。低到模型无法遵守时，真实输出可能反弹，答案也可能变差。TALE 的价值是把“合理预算”从拍脑袋变成可搜索、可估计、可训练的对象。</p>
+</div>
+<p><strong>核心现象：预算写小，真实输出未必更短</strong></p>
+<p>当预算仍在模型能完成任务的区间内，输出会随预算下降；一旦预算过低，模型可能忽略约束，或者为了补救极短预算而生成更长解释，TALE 把这个现象叫作 <strong>token elasticity</strong>。</p>
+<div class="article-callout">
+<p>💡 <strong>budget search：</strong>目标是搜索“仍然答对，并且实际输出 token 继续下降”的预算。继续压缩如果不再更短，或正确性开始受损，就应该停止。</p>
+</div>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>朴素二分的问题</strong></p>
+<p>先用 Vanilla CoT 得到实际输出长度，把它作为搜索右边界；然后不断尝试更小的预算。如果只要求答案正确，搜索会逼近“最小还能答对”的 budget。</p>
+  </div>
+  <div class="article-column">
+<p><strong>TALE 的修正</strong></p>
+<p>所以论文把 feasibility 改成两个条件：候选预算下答案要正确，并且实际输出 token 要比上一轮预算更少。</p>
+<p>如果继续压预算导致答案错，或者实际输出 token 开始反弹，就停止搜索，返回上一轮仍然有效的预算。</p>
+  </div>
+</div>
+<p><strong>两条路线：先 prompt 化，再训练化</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>TALE-EP：无训练路线</strong></p>
+<p>先让模型估计预算，输出类似 <code>Budget: [[12]]</code> 的格式，再把预算写进最终解题 prompt。</p>
+<p><strong>适用：</strong>闭源 API、不能训练、需要快速验证预算控制收益。</p>
+<p><strong>代价：</strong>多一次预算估计调用，估低会进入 token elasticity 反弹区，估高则省不了 token。</p>
+  </div>
+  <div class="article-column">
+<p><strong>TALE-PT：训练路线</strong></p>
+<p>先离线为每个训练问题搜索 <strong>optimal budget</strong>，再用这个预算 prompt 生成短而正确的 target output。后训练阶段让模型拟合或偏好这些 target outputs，使它在没有显式预算约束的 prompt 下，也更倾向生成 token-efficient reasoning。</p>
+<p><strong>适用：</strong>自有模型后训练，希望减少额外 estimator 调用。</p>
+<p><strong>代价：</strong>依赖离线搜索、答案校验和训练数据质量。</p>
+  </div>
+</div>
+<p><strong>结果：TALE-EP 看在线省成本，TALE-PT 看预算意识能否内化</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>方法</th>
+      <th>平均准确率</th>
+      <th>平均 tokens</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Directly Answering</td>
+      <td>52.31%</td>
+      <td>14.57</td>
+      <td>很短，但复杂题能力不足。</td>
+    </tr>
+    <tr>
+      <td>Vanilla CoT</td>
+      <td>83.75%</td>
+      <td>461.25</td>
+      <td>准确但昂贵。</td>
+    </tr>
+    <tr>
+      <td><strong>TALE-EP</strong></td>
+      <td><strong>81.03%</strong></td>
+      <td><strong>148.72</strong></td>
+      <td><strong>token 约降到三分之一，准确率小降。</strong></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p>TALE-PT 的SFT 在两个数据集上都把输出 token 明显压下来，同时保持或提升准确率；DPO 在 GSM8K-Zero 上也明显优于 Vanilla CoT。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>数据集</th>
+      <th>Vanilla CoT</th>
+      <th>TALE-PT-SFT</th>
+      <th>TALE-PT-DPO</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>GSM8K</strong></td>
+      <td>77.56% / 241.51 tokens</td>
+      <td><strong>78.57% / 139.63 tokens</strong></td>
+      <td>74.11% / 149.93 tokens</td>
+      <td>SFT 同时略升准确率并减少约 42% 输出 token。</td>
+    </tr>
+    <tr>
+      <td><strong>GSM8K-Zero</strong></td>
+      <td>65.04% / 251.08 tokens</td>
+      <td><strong>78.43% / 77.85 tokens</strong></td>
+      <td><strong>78.41% / 113.41 tokens</strong></td>
+      <td>这里长 CoT 会过度思考；TALE-PT 把短正确模式学进去后，准确率和 token 都更好。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<hr>
+<h3 id="3">3. 需要训练：把预算意识写进模型行为</h3>
+<div class="article-callout">
+<p>💡 <strong>本节重点：</strong>训练层解决 prompt 控制不稳定的问题：SelfBudgeter 训练显式预算，Self-Training 蒸馏短正确路径，TLRE 用 <code>alpha</code> 控制整体压缩强度，L1/LEASH 用 RL 约束请求级或分布级长度。</p>
+</div>
+<h4 id="3-1-selfbudgeter">3.1 SelfBudgeter：把预算变成模型先承诺、再遵守的接口</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2505.11274">SelfBudgeter: Adaptive Token Allocation for Efficient LLM Reasoning</a>（arXiv 2025；<a href="https://arxiv.org/pdf/2505.11274">PDF</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 reasoning model 对简单题也经常输出很长 CoT，SelfBudgeter 试图让模型学会 instance-wise allocation：简单题少想，难题多想，并且在回答前把预算显式说出来。</p>
+</div>
+<p><strong>问题不是“少想一点”，而是“先知道该想多久”</strong></p>
+<pre><code>&lt;budget&gt;an integer&lt;/budget&gt;&lt;solution&gt;response&lt;/solution&gt;</code></pre>
+<p>因此论文实际希望模型同时学会三件事：</p>
+<ol>
+  <li><p>先按固定格式输出预算。</p></li>
+  <li><p>对简单题给更小预算，对困难题给更大预算。</p></li>
+  <li><p>在预算内尽量生成正确且不冗长的答案。</p></li>
+</ol>
+<p><strong>训练流程：先让模型会写预算，再用 RL 把预算和长度绑起来</strong></p>
+<ol>
+  <li><p><strong>Data preprocessing：</strong>先让原模型生成回答，记录答案正确性 <code>C</code> 和 response length。若回答正确，就把当前长度当作 <code>bmax</code>；若回答错误，就把 <code>bmax</code> 设为无穷大，避免“短但错”的样本被当作好目标。</p></li>
+  <li><p><strong>Cold-start SFT：</strong>只保留正确回答，把原回答长度填进 <code>&lt;budget&gt;</code>，让模型先学会可解析格式，并尽量保住原有 reasoning 能力。这里的数据选择会影响后续长度：长而高质量的数据保准确率，但也会让模型更长。</p></li>
+  <li><p><strong>Budget-guided GRPO：</strong>进入 RL 阶段后，同时优化格式、预算大小、实际长度和正确性。核心目标不是直接找最小预算，而是让模型学会“先报一个合理预算，再在这个预算附近答对”。</p></li>
+</ol>
+<figure class="article-figure">
+  <img src="assets/fig04-selfbudgeter.png" alt="图 4：SelfBudgeter 训练框架（截自 SelfBudgeter 原论文）">
+  <figcaption>图 4：SelfBudgeter 训练框架（截自 SelfBudgeter 原论文）</figcaption>
+</figure>
+<p><strong>Reward 结构：预算预测和预算遵守是两件事</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>预算预测：约束模型报出的 b</strong></p>
+<p><strong>Budget Penalty</strong> 只看模型自己输出的预算 <code>b</code> 是否超过 <code>bmax</code>。如果 <code>b &lt;= bmax</code>，不惩罚；如果超过上界，就扣分。它防止模型通过报一个很大的预算逃避长度控制。</p>
+<pre><code>PB(b, bmax) = 0,  if b &lt;= bmax
+PB(b, bmax) = rb, otherwise</code></pre>
+  </div>
+  <div class="article-column">
+<p><strong>预算遵守：约束实际长度 l</strong></p>
+<p><strong>PreB Reward</strong> 看 response length <code>l</code> 和预算 <code>b</code> 的相对关系。</p>
+<ul>
+  <li><p>正确回答最好接近 <code>(1 - alpha) * b</code>，鼓励在答对时更短；</p></li>
+  <li><p>错误回答最好接近 <code>(1 + alpha) * b</code>，鼓励没答对时多想一点。</p></li>
+</ul>
+  </div>
+</div>
+<p>这比“越短越好”更细：它训练的是条件策略，而不是统一短答。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>组件</th>
+      <th>约束对象</th>
+      <th>为什么需要</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Format Penalty</strong></td>
+      <td><code>&lt;budget&gt;</code> / <code>&lt;solution&gt;</code> 格式</td>
+      <td>没有可解析格式，后面所有预算评估都失效。</td>
+    </tr>
+    <tr>
+      <td><strong>Budget Penalty</strong></td>
+      <td>模型报出的预算 <code>b</code></td>
+      <td>防止模型报大预算，保持预算有产品含义。</td>
+    </tr>
+    <tr>
+      <td><strong>PreB Reward</strong></td>
+      <td>实际长度 <code>l</code> 与预算 <code>b</code> 的关系</td>
+      <td>让预算数字真正影响生成，而不是只写在标签里。</td>
+    </tr>
+    <tr>
+      <td><strong>Accuracy Reward</strong></td>
+      <td>最终答案正确性</td>
+      <td>保证“答对但超预算”仍优先于“短但答错”。论文要求 <code>sC_min + rb &gt;= sW_max</code>。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 同时，论文还使用 dynamic alpha schedule。训练早期容忍区间更宽，先学格式和大方向；训练后期再收紧预算与实际长度的一致性。固定 alpha 太松会让模型报大预算，太紧又容易让预算坍缩到当前长度。</p>
+</div>
+<p><strong>实验结论：不是最短，而是更好的 accuracy-length Pareto 点</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>数据集</th>
+      <th>原模型 Acc / Len</th>
+      <th>SelfBudgeter-1.5B Acc / Len</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>GSM8K</strong></td>
+      <td>73.09 / 2865.08</td>
+      <td><strong>84.10 / 1231.79</strong></td>
+      <td>简单题上大量冗余被删掉，准确率还提升。</td>
+    </tr>
+    <tr>
+      <td><strong>MATH500</strong></td>
+      <td>74.93 / 5327.12</td>
+      <td><strong>78.47 / 2326.85</strong></td>
+      <td>长度约降到 44%，准确率仍提升。</td>
+    </tr>
+    <tr>
+      <td><strong>AIME2025</strong></td>
+      <td>22.22 / 14444.03</td>
+      <td><strong>21.11 / 4288.10</strong></td>
+      <td>长度约降到 30%，但难题准确率略降，说明预算压缩有能力边界。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<blockquote>
+<p><strong>边界：</strong><code>bmax</code> 不是最小充分预算，只是当前模型一次正确回答的可接受上界。论文 case study 显示，96.06% 的缩短来自删掉 conversational filler，3.94% 才体现为更高效的问题求解策略；同时也有少量样本因为预算过紧漏掉关键步骤。SelfBudgeter 更适合说明“预算接口 + 冗余删除”，不能被解读为已经解决任意任务上的精确长度控制。</p>
+</blockquote>
+<h4 id="3-2-self-training">3.2 Self-Training：从模型自己的输出分布里捞短正确解</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2502.20122">Self-Training Elicits Concise Reasoning in Large Language Models</a>（ACL 2025 Findings / arXiv 2025；<a href="https://arxiv.org/pdf/2502.20122">PDF</a>；<a href="https://github.com/TergelMunkhbat/concise-reasoning">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 SelfBudgeter 训练的是显式预算接口；Self-Training 训练的是默认输出风格，把模型默认分布从“长且冗余”推向“短但仍正确”。</p>
+</div>
+<p><strong>长 CoT 不是全都在思考</strong></p>
+<p>很多 trace 的 COT 里会重复题意、铺垫“we need to...”、算完后再次确认，或者把简单算术写成讲义，因此可以考虑：同一个模型多采样几次，经常能采到比默认输出更短、但最终答案仍正确的 reasoning path。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th><strong>冗余类型</strong></th>
+      <th><strong>常见表现</strong></th>
+      <th><strong>为什么可压缩</strong></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>重复题意</strong></td>
+      <td>先把题目再说一遍</td>
+      <td>通常不增加新的解题状态。</td>
+    </tr>
+    <tr>
+      <td><strong>口语化铺垫</strong></td>
+      <td><code>To find out...</code> / <code>we need to...</code></td>
+      <td>提高可读性，但对模型继续推理贡献有限。</td>
+    </tr>
+    <tr>
+      <td><strong>重复确认</strong></td>
+      <td>答案已经算出后反复验证</td>
+      <td>简单题上常常是过度保险。</td>
+    </tr>
+    <tr>
+      <td><strong>过度展开</strong></td>
+      <td>简单题也写多步讲解</td>
+      <td>不是所有 reasoning trace 都需要教学式解释。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>方法：三类自生成策略都服务于 shortest correct path</strong></p>
+<div class="article-callout">
+<p>💡 <strong>方法目标只有一个：</strong>为每道训练题构造“短且正确”的 SFT target。不同方法的区别在于候选池怎么生成：直接从默认分布采样、用 concise exemplars 把分布推短，或者在 few-shot 分布里再做 BoN。</p>
+</div>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>自生成策略</th>
+      <th>候选池怎么来</th>
+      <th>SFT target 怎么选</th>
+      <th>作用</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Naive BoN</strong></td>
+      <td>对每道训练题用默认 prompt 采样 <code>N=16</code> 条 reasoning paths。</td>
+      <td>用 final-answer verifier 过滤错误答案，只在正确 paths 中选 token 最短的一条。</td>
+      <td>证明当前模型自己的默认分布里已经存在短正确解，但单靠默认分布采样效率有限。</td>
+    </tr>
+    <tr>
+      <td><strong>FS-GPT4o</strong></td>
+      <td>在 prompt 中加入 8 个 GPT-4o concise exemplars，让当前模型按更短风格生成；默认还会合并 default-distribution candidates 做 augmentation。</td>
+      <td>在 few-shot candidates 和 default candidates 的合并池中选 shortest correct path。</td>
+      <td>把候选分布推向短解区域，同时保留难题从默认分布里找到足够长正确解的机会。</td>
+    </tr>
+    <tr>
+      <td><strong>FS-GPT4o-BoN</strong></td>
+      <td>在 GPT-4o concise exemplars prompt 下采样 <code>N=16</code>，再额外加入默认分布 <code>N=16</code> 候选。</td>
+      <td>在 combined pool 中过滤正确答案并选择最短路径。</td>
+      <td>主力方案：同时利用 few-shot 的短候选和 BoN 的多候选筛选。</td>
+    </tr>
+    <tr>
+      <td><strong>Budget-Matched</strong></td>
+      <td>把 FS-GPT4o-BoN 的候选预算控制为 8 条 FS-conditioned + 8 条 default candidates。</td>
+      <td>仍然在合并池中选 shortest correct path。</td>
+      <td>用于验证收益不是简单来自更多采样，而是来自候选分布和筛选策略。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>为什么不直接蒸馏外部短 CoT</strong></p>
+<p>论文里一个重要反例是外部数据微调：Human CoT 和 GPT-4o CoT 能让输出变短，但准确率会明显下降，尤其 MATH 上 GPT-4o CoT 从 baseline 的 46.40 掉到 40.44。这说明短 reasoning 风格不完全可迁移；别的模型或人类写出的短 COT，可能和当前模型内部推理分布不匹配。</p>
+<p><strong>实验结论：更短输出伴随准确率 tradeoff</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>实验分组</th>
+      <th>方法</th>
+      <th>GSM8K Acc</th>
+      <th>GSM8K Len</th>
+      <th>MATH Acc</th>
+      <th>MATH Len</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Zero-Shot Prompting</td>
+      <td><strong>Baseline</strong></td>
+      <td>78.06</td>
+      <td>241.87</td>
+      <td>46.40</td>
+      <td>480.37</td>
+      <td>默认 zero-shot CoT，是所有长度下降的参照点。</td>
+    </tr>
+    <tr>
+      <td>Zero-Shot Prompting</td>
+      <td><strong>Hand Crafted 2</strong></td>
+      <td>76.72</td>
+      <td>184.13</td>
+      <td>46.84</td>
+      <td>404.85</td>
+      <td>手写短答 prompt 能压长度，但不是训练后的默认行为。</td>
+    </tr>
+    <tr>
+      <td>FT - External Data</td>
+      <td><strong>GPT4o CoT</strong></td>
+      <td>76.36</td>
+      <td>156.24</td>
+      <td>40.44 ↓</td>
+      <td>399.80</td>
+      <td>外部短 CoT 很短，但 MATH 准确率明显下降，支持“分布错配”风险。</td>
+    </tr>
+    <tr>
+      <td>FT - Best-of-N Self-Generation</td>
+      <td><strong>Naive BoN</strong></td>
+      <td>77.12</td>
+      <td>214.22</td>
+      <td>47.64</td>
+      <td>433.26</td>
+      <td>来自模型自己的默认分布，能缩短，但幅度有限。</td>
+    </tr>
+    <tr>
+      <td>FT - Few-Shot Conditioned Self-Generation</td>
+      <td><strong>FS-GPT4o</strong></td>
+      <td>78.07</td>
+      <td>175.54</td>
+      <td>47.36</td>
+      <td>421.21</td>
+      <td>GPT-4o concise exemplars 把候选分布推短，准确率保持较好。</td>
+    </tr>
+    <tr>
+      <td>FT - Few-Shot Conditioned Best-of-N Self-Generation</td>
+      <td><strong>FS-GPT4o-BoN</strong></td>
+      <td>75.88 ↓</td>
+      <td>153.38</td>
+      <td>47.36</td>
+      <td>364.33</td>
+      <td>压缩最强，但 GSM8K 有准确率代价；不能只看平均 token 下降。</td>
+    </tr>
+    <tr>
+      <td>FT - Few-Shot Conditioned Best-of-N Self-Generation</td>
+      <td><strong>FS-GPT4o-BoN Budget-Matched</strong></td>
+      <td>76.24</td>
+      <td>160.59</td>
+      <td>47.52</td>
+      <td>384.43</td>
+      <td>8+8 候选预算受控后仍优于 Naive BoN，说明收益不只是因为采样更多。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 <strong>难度自适应：</strong>MATH 难度越高，长度下降越小。这说明模型不是被训练成统一短答，而是更像学会了：简单题删掉铺垫，难题保留更多步骤。它不同于 TALE/L1 的显式预算控制，自适应来自训练样本分布和题目本身。</p>
+</div>
+<h4 id="3-3-training-language-models-to-reason-efficiently-alpha">3.3 Training Language Models to Reason Efficiently：用一个 alpha 把长思考压到可部署区间</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2502.04463">Training Language Models to Reason Efficiently</a>（NeurIPS 2025；<a href="https://arxiv.org/pdf/2502.04463">PDF</a>；<a href="https://github.com/Zanette-Labs/efficient-reasoning">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 以最直接的方式，在 RL 阶段让模型少生成无必要的 token。</p>
+</div>
+<p><strong>只奖励“短且正确”，但要按题目归一化</strong></p>
+<p>论文从最常见的数学 RLVR 设置出发。给定 prompt <code>x</code>，模型生成完整 response <code>y</code>，其中包含 chain-of-thought 和 final answer。verifier 只判断最终答案是否正确：</p>
+<div class="math math-display">\[
+f(x,y)=\mathbf{1}\{\mathrm{final\_answer}(y)=y^*(x)\}
+\]</div>
+<p><strong>普通 accuracy 目标：</strong></p>
+<div class="math math-display">\[
+J_{\mathrm{acc}}(\pi)=\mathbb{E}_{x,y\sim\pi}[f(x,y)]
+\]</div>
+<p><strong>Length-aware 目标：</strong></p>
+<div class="math math-display">\[
+J_{\mathrm{len}}(\pi)=\mathbb{E}_{x,y\sim\pi}\left[f(x,y)\left(1-\alpha f_{\mathrm{len}}(\mathrm{LEN}(y))\right)\right]
+\]</div>
+<p><strong>长度归一化项：</strong></p>
+<div class="math math-display">\[
+f_{\mathrm{len}}(\mathrm{LEN}(y))=\sigma\left(\frac{\mathrm{LEN}(y)-\mathrm{MEAN}(Y)}{\mathrm{STD}(Y)}\right)
+\]</div>
+<div class="article-callout">
+<p>💡 <strong>核心直觉：</strong><code>alpha</code> 是压缩强度。论文不是直接惩罚绝对长度，而是给长度惩罚提供当前题目的相对尺度：低于当前均值的正确 response 惩罚更小，高于当前均值的正确 response 惩罚更大。训练信号因此会把概率质量从偏长的正确轨迹挪向更短的正确轨迹。</p>
+</div>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>正确性门槛</strong></p>
+<p>错误答案不会因为短而变好。长度竞争只发生在最终答案正确的 responses 内部。</p>
+  </div>
+  <div class="article-column">
+<p><strong>按题目归一化</strong></p>
+<p>AIME 难题天然需要更多 token，GSM8K 简单题天然应该更短。per-prompt normalization 避免直接惩罚绝对长度误伤难题。</p>
+  </div>
+</div>
+<p><strong>训练细节：一个很小但重要的坑是 advantage normalization</strong></p>
+<p>作者使用 PPO with RLOO advantage estimator。RLOO 的直觉是：对同一个 prompt 采样多个 response，用某个 response 的 reward 减去其他 response 的平均 reward，作为它的 advantage。</p>
+<p><strong>实验结果：不是“越短越好”，而是给下游选择 tradeoff</strong></p>
+<figure class="article-figure">
+  <img src="assets/fig05-tlre-tradeoff.png" alt="图 6：length-aware RL 的 accuracy-token trade-off（截自 Training Language Models to Reason Efficiently 原论文）">
+  <figcaption>图 6：length-aware RL 的 accuracy-token trade-off（截自 Training Language Models to Reason Efficiently 原论文）</figcaption>
+</figure>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>结果层次</th>
+      <th>论文现象</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>alpha 扫 tradeoff</strong></td>
+      <td><code>alpha = 0.05, 0.1, 0.2, 0.4</code> 对应不同 token-accuracy tradeoff。<code>alpha</code> 越大，token 越少，但准确率通常更低。作者报告 7B 可以在 token 减少约 50% 时，准确率下降小于 5%。</td>
+      <td>这说明存在较好的 Pareto 区间，但不是所有数据点都无损，也不是自动找到最佳长度。</td>
+    </tr>
+    <tr>
+      <td><strong>简单题省更多，难题省更少</strong></td>
+      <td><code>alpha = 0.1</code> 时，7B 在 MATH500 上 CoT 长度从约 4000 降到约 2600，准确率只降 2.2 个百分点。<code>alpha = 0.2</code> 时，7B 在 AIME2024 上 token 从约 13000 降到约 9000，准确率降约 4 个百分点；同样 <code>alpha = 0.2</code> 下，GSM8K token saving 可达 83%，AIME2024 是 27%。</td>
+      <td>简单题里有更多过度验证和口语化铺垫，难题确实需要保留更多搜索空间。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 <strong>关键边界：</strong><code>alpha</code> 控制整体 generation cost，但不能精确 target 某个 generation length；它不输出预算，也不让用户指定单题 token 上限。</p>
+</div>
+<h4 id="3-4-l1-leash">3.4 L1 与 LEASH：把长度控制做成训练约束</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2503.04697">L1: Controlling How Long A Reasoning Model Thinks With Reinforcement Learning</a>（COLM 2025；<a href="https://arxiv.org/pdf/2503.04697">PDF</a>；<a href="https://github.com/cmu-l3/l1">Code</a>）
+<strong>论文来源：</strong><a href="https://arxiv.org/abs/2512.21540">Leash: Adaptive Length Penalty and Reward Shaping for Efficient Large Reasoning Model</a>（arXiv 2025；<a href="https://arxiv.org/pdf/2512.21540">PDF</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 3.3 的 <code>alpha</code> 控制整体 generation cost，但不能精确 target 某个 generation length；L1 和 LEASH 往前走一步，把长度控制写成训练约束。区别是：L1 控单请求预算跟随，LEASH 控训练分布的平均长度。</p>
+</div>
+<p><strong>先抓住问题：两篇论文控制的不是同一个对象</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>L1 / LCPO</strong></p>
+<p>把目标长度或最大预算写进 prompt，再用 RL 奖励正确性和长度遵守。它更接近线上请求级预算接口。</p>
+  </div>
+  <div class="article-column">
+<p><strong>LEASH</strong></p>
+<p>把平均生成长度不超过目标长度写成 Lagrangian 约束，超长时动态增大惩罚，达标时放松。</p>
+  </div>
+</div>
+<p><strong>L1：让模型学会在预算内换推理策略</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>模式</th>
+      <th>训练目标</th>
+      <th>适合什么</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>LCPO-Exact</strong></td>
+      <td>奖励答案正确，同时惩罚生成长度偏离目标长度</td>
+      <td>研究 exact length following。</td>
+    </tr>
+    <tr>
+      <td><strong>LCPO-Max</strong></td>
+      <td>只有答案正确时才奖励不超过最大预算。</td>
+      <td>在正确的基础上训练长度遵循</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<div class="article-callout">
+<p>💡 训练阶段，<code>n_gold</code> 从 <span class="math">\(U(n_{\min}, n_{\max}\)</span> 均匀采样，论文设置 <span class="math">\(n_{\min}=10\)</span>、<span class="math">\(n_{\max}=400\)</span>，因此 L1 学到的是一个连续预算区间内的长度跟随能力。</p>
+</div>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>LCPO-Exact 公式</strong></p>
+<div class="math math-display">\[
+r(y,y_{\mathrm{gold}},n_{\mathrm{gold}})=\mathbf{1}\{y=y_{\mathrm{gold}}\}-\alpha\lvert n_{\mathrm{gold}}-n_y\rvert
+\]</div>
+<p>同时惩罚答案错误和长度偏离目标，适合研究模型能不能精确跟随长度指令。</p>
+  </div>
+  <div class="article-column">
+<p><strong>LCPO-Max 公式</strong></p>
+<div class="math math-display">\[
+r=\mathbf{1}\{\mathrm{correct}\}\cdot\operatorname{clip}\left(\alpha(n_{\mathrm{gold}}-n_y)+\delta,0,1\right)
+\]</div>
+<p>乘法结构很关键：只有答对时，短于最大预算才有意义。答错但很短不会拿到好 reward。</p>
+  </div>
+</div>
+<p><strong>L1 实验结论</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>实验层次</th>
+      <th>论文现象</th>
+      <th>结论</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>长度遵守能力</strong></td>
+      <td>数学数据集上，L1-Exact 平均长度误差约 3%；L1-Max 的软预算违规率平均约 1.3%，低于 2.5%。</td>
+      <td>Exact 证明模型能贴近指定长度，Max 证明模型能稳定不超预算。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>Short Reasoning Models：长 CoT 能力可以压成短预算推理</strong></p>
+<figure class="article-figure">
+  <img src="assets/fig06-short-cot-results.png" alt="L1 原论文 Table 1：Short Reasoning Models 的短输出对比">
+  <figcaption>L1 原论文 Table 1：Short Reasoning Models 的短输出对比</figcaption>
+</figure>
+<div class="article-callout">
+<p>💡 作者发现，经过训练的模型在短输出长度下仍然保留了不少 reasoning pattern，并且在相同或相近输出长度下超过了一些更大的非推理模型。短预算不是让模型放弃推理。L1 在低 token 档位仍然保留 self-correction、verification、conclusion drawing 等推理模式，只是这些行为的频率和表达方式随预算变化。原本的长 CoT 模型已经有完整推理轨迹能力；LCPO 相当于训练它在预算里保留最有用的推理步骤。短预算不是非推理，而更像压缩推理。</p>
+</div>
+<p><strong>LEASH：只惩罚超长，不奖励越短越好</strong></p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>回答</th>
+      <th>长度相对目标</th>
+      <th>处理方式</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>超长但答对</strong></td>
+      <td>超过目标长度</td>
+      <td>惩罚超长部分，并通过动态 <code>lambda</code> 拉紧约束。</td>
+    </tr>
+    <tr>
+      <td><strong>远短且答对</strong></td>
+      <td>低于目标长度</td>
+      <td>不额外奖励“越短越好”，避免模型为了短牺牲必要推理。</td>
+    </tr>
+    <tr>
+      <td><strong>答错</strong></td>
+      <td>任意长度</td>
+      <td>正确性仍是第一目标。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<p><strong>LEASH 的约束优化形式：平均超长才拉紧惩罚</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>原始目标</strong></p>
+<div class="math math-display">\[
+\max_{\pi}\ \mathbb{E}_{x,y\sim\pi}[r(x,y)]
+\]</div>
+<div class="math math-display">\[
+\mathrm{s.t.}\ \mathbb{E}_{x,y\sim\pi}\left[\frac{L(y)}{L_t}-1\right]\le 0
+\]</div>
+<p>它控制的是训练分布上的平均长度，不是每个样本的硬 SLA。</p>
+  </div>
+  <div class="article-column">
+<p><strong>Lagrangian 反馈</strong></p>
+<div class="math math-display">\[
+\Delta=\max\left(0,\frac{L(y)}{L_t}-1\right)
+\]</div>
+<div class="math math-display">\[
+r_{\mathrm{shaped}}=\operatorname{clip}\left(r-\lambda\Delta,-1,1\right)
+\]</div>
+<p>只有超长回答被惩罚；远短于目标的回答不会因为“短”本身拿奖励，避免 underthinking。</p>
+  </div>
+</div>
+<div class="article-callout">
+<p>💡 <strong>lambda 不是一直变大：</strong>训练早期平均长度超过目标，<code>lambda</code> 上升，惩罚变强；当模型逐渐满足长度约束后，<code>lambda</code> 会下降。这个反馈环比固定 penalty 更稳，因为同一个惩罚系数在训练早期可能太弱，在后期又可能太强。</p>
+</div>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>设置</th>
+      <th>Original</th>
+      <th>LEASH 结果与含义</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1.5B, Lt=4k</strong></td>
+      <td>33.1 acc / 15727 tokens</td>
+      <td><strong>33.9 acc / 5873 avg tokens</strong>，准确率略升，平均生成长度从 15727 降到 5873；这不是“严格遵循 4k”的结果。</td>
+    </tr>
+    <tr>
+      <td><strong>4B, Lt=12k</strong></td>
+      <td>75.5 / 19553</td>
+      <td><strong>74.6 / 14428</strong>，轻微掉点换 26.2% token 降低。</td>
+    </tr>
+    <tr>
+      <td><strong>4B, Lt=8k</strong></td>
+      <td>75.5 / 19553</td>
+      <td><strong>70.1 / 12042</strong>，目标过紧时准确率明显下降，说明 LEASH 不是无损压缩魔法。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<hr>
+<h3 id="4-reasoning-unit">4. 精修：从压缩长度到剪 reasoning unit</h3>
+<div class="article-callout">
+<p>💡 高级 RTE 不是裁文本长度，而是判断哪些 step/unit 对 <strong>答案和后续推理</strong> 有贡献。</p>
+</div>
+<h4 id="4-1-step-entropy">4.1 Step Entropy：低熵步骤可能是可跳过的慢想填充</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://arxiv.org/abs/2508.03346v2">Making Slow Thinking Faster: Compressing LLM Chain-of-Thought via Step Entropy</a>（ICLR 2026 / arXiv 2025；<a href="https://arxiv.org/pdf/2508.03346v2">PDF</a>；<a href="https://github.com/staymylove/COT_Compresstion_via_Step_entropy">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 长 CoT 中到底哪些步骤是关键推理，哪些只是模型很有把握、很可预测、因此可能冗余的“慢想填充”？用生成时的不确定性给每一步排序；低熵 step 更像可跳过的慢想填充，高熵 step 更可能承载关键决策。</p>
+</div>
+<p><strong>压缩对象从 token 变成 reasoning step</strong></p>
+<p>这篇论文的关键不是提出“越短越好”，而是把压缩单位上移到相对完整的推理步骤。Token-level pruning 容易打碎公式、连接词和局部语法，剩余文本虽然更短，却不一定还能被模型继续使用；step-level pruning 则保留未剪步骤的内部完整性。</p>
+<p><strong>两条机制：entropy 排序，以及 [SKIP] 保结构</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>机制一：step entropy</strong></p>
+<p>对每个 step 聚合 token-level Shannon entropy，并做 length normalization，避免长 step 天然得分更高。</p>
+<p><span class="math">\(H(s)=\frac{1}{\operatorname{len}(s)}\sum_t-\sum_v p_t(v)\log p_t(v\)</span></p>
+<p><strong>结论：</strong>entropy 是排序信号，不是“低熵一定无用”的证明。</p>
+  </div>
+  <div class="article-column">
+<p><strong>机制二：[SKIP] 占位</strong></p>
+<p>静态剪枝不直接删除低熵 step，而是替换成 <code>[SKIP]</code>。这个占位告诉模型这里存在被省略的中间过程，减少上下文突然断裂带来的不稳定。</p>
+<p><strong>工程含义：</strong>如果系统不展示 CoT，<code>[SKIP]</code> 更像内部结构信号；如果要给人审计，需要重新考虑可读性。</p>
+  </div>
+</div>
+<div class="article-callout">
+<p>💡 <strong><code>[SKIP]</code>不是作者主观拍脑袋：</strong>在 DeepSeek-R1-7B 上比较 <code>[SKIP]</code>、<code>[MASK]</code>、<code>and then</code> 和直接删除 step，剪枝比例是 80%、85%、90%。80% pruning 时几种方式都能维持 Full CoT accuracy，约 74%；到 90% pruning 时，直接删除和 <code>[MASK]</code> 约 68%，显式占位的 <code>[SKIP]</code> / <code>and then</code> 约 70%。</p>
+</div>
+<p><strong>方法流程：先做静态诊断，再训练模型自主压缩</strong></p>
+<ol>
+  <li><p><strong>生成完整 CoT 并切成 steps：</strong>把压缩对象从单个 token 换成完整 reasoning unit。</p></li>
+  <li><p><strong>计算 length-normalized step entropy：</strong>用生成分布的不确定性估计每个 step 的信息贡献。</p></li>
+  <li><p><strong>按低熵优先替换为<code>[SKIP]</code>：</strong>论文使用 80% lowest-entropy steps 作为静态 probe 的经验点。</p></li>
+  <li><p><strong>SFT + GRPO 蒸馏：</strong>让模型直接学会生成压缩 CoT，避免线上先完整生成再事后压缩。</p></li>
+</ol>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>阶段</th>
+      <th>训练/处理方式</th>
+      <th>作用</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Static pruning</strong></td>
+      <td>完整 CoT -&gt; step entropy 排序 -&gt; 低熵 step 替换为 <code>[SKIP]</code></td>
+      <td>验证 entropy 能否区分可删步骤；不直接节省完整 CoT 的生成成本。</td>
+    </tr>
+    <tr>
+      <td><strong>SFT</strong></td>
+      <td>用 entropy-compressed <code>(problem, compressed CoT, answer)</code> 训练</td>
+      <td>让模型学会在合适位置主动输出 <code>[SKIP]</code>。</td>
+    </tr>
+    <tr>
+      <td><strong>GRPO</strong></td>
+      <td>结合 correctness、skip ratio、skip number penalty、response length penalty</td>
+      <td>防止模型滥用 <code>[SKIP]</code>，在准确率、跳步比例和长度之间找平衡。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<figure class="article-figure">
+  <img src="assets/fig07-step-entropy.png" alt="图 8：Step Entropy 压缩框架（截自 Making Slow Thinking Faster 原论文）">
+  <figcaption>图 8：Step Entropy 压缩框架（截自 Making Slow Thinking Faster 原论文）</figcaption>
+</figure>
+<p><strong>entropy 能排序风险，不等于无损压缩</strong></p>
+<p>最重要的 sanity check 是 low-entropy、high-entropy、random 三种剪枝的分叉：低熵剪枝在较高 mask ratio 下更稳，高熵剪枝很快伤害准确率，random 介于两者之间。这说明 entropy 确实区分了“更可删”和“更危险”的步骤。</p>
+<div class="article-callout">
+<p>💡 <strong>结论边界：</strong>80% 是论文 controlled probe 和数学 benchmark 上的经验设置，不是所有任务的安全阈值。AIME 等高难任务仍会掉点。</p>
+</div>
+<h4 id="4-2-sgp-cot-likelihood-unit">4.2 SGP-CoT：用模型自己的 likelihood 判断 unit 是否可删</h4>
+<blockquote>
+<p><strong>论文来源：</strong><a href="https://aclanthology.org/2026.acl-long.25/">Your Reasoning Model Knows What Counts: Self-Guided Chain-of-Thought Pruning for Efficient Reasoning</a>（ACL 2026 Long Papers；<a href="https://aclanthology.org/2026.acl-long.25.pdf">PDF</a>；<a href="https://github.com/HammerScholar/SGP-CoT">Code</a>）</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 如果某个 reasoning unit 看起来可删，谁有资格判断它真的不重要？可以考虑用同一个模型的 likelihood 变化衡量 unit 对最终答案和下一步连贯性的影响，再把自裁剪结果转成 preference data。</p>
+</div>
+<p><strong>冗余是模型相关的</strong></p>
+<p>同一个中间步骤，对一个模型可能只是绕路，对另一个模型可能是进入正确路径前的必要路径。所以 SGP-CoT 不依赖外部 pruner 或固定长度惩罚，而是考虑删除这个 unit 后，目标模型自己是否更不相信答案，或更难接上下一步推理？</p>
+<p><strong>两类 impact：答案支撑和局部连贯性</strong></p>
+<div class="article-columns" data-column-count="2">
+  <div class="article-column">
+<p><strong>answer impact</strong></p>
+<p>比较删除某个 unit 前后 final answer 的平均 log-likelihood。若删除后答案 likelihood 明显下降，说明这个 unit 直接支撑最终答案。</p>
+<p><strong>公式直觉：</strong></p>
+<div class="math math-display">\[
+\Delta_A=\log p(\mathrm{answer}\mid \mathrm{trace})-\log p(\mathrm{answer}\mid \mathrm{trace}\setminus u)
+\]</div>
+<p><strong>保留对象：</strong>answer-critical units。</p>
+  </div>
+  <div class="article-column">
+<p><strong>coherence impact</strong></p>
+<p>比较删除某个 unit 前后下一步 unit 的 likelihood。它保护那些不直接决定答案、但让后续 reasoning 能接上的桥接步骤。</p>
+<p><strong>公式直觉：</strong></p>
+<div class="math math-display">\[
+\Delta_C=\log p(\mathrm{next}\mid \mathrm{trace})-\log p(\mathrm{next}\mid \mathrm{trace}\setminus u)
+\]</div>
+<p><strong>保留方式：</strong>先进入 buffer，等后续出现 answer-critical unit 时一起提交。</p>
+  </div>
+</div>
+<div class="article-callout">
+<p>💡 <strong>结论重点：</strong>SGP-CoT 不追求极限短，而是追求 accuracy-sensitive compression。它尊重模型自己的推理支架，所以比外部规则剪枝更适合高可靠场景。</p>
+</div>
+<p><strong>剪枝规则：先保答案关键，再处理连贯性支架</strong></p>
+<p>这张表保留为参数对照：<code>tau_A</code> 决定 answer-critical unit，<code>tau_C</code> 决定 coherence-supporting unit，buffer 机制则避免把桥接步骤过早删除。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>unit 类型</th>
+      <th>判断条件</th>
+      <th>动作</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>answer-critical</strong></td>
+      <td><strong>判断：</strong><span class="math">\(\Delta_A\ge\tau_A\)</span>，默认 <span class="math">\(\tau_A=0.0\)</span>。</td>
+      <td>永远保留。</td>
+    </tr>
+    <tr>
+      <td><strong>coherence-supporting</strong></td>
+      <td><strong>判断：</strong><span class="math">\(\Delta_A\lt\tau_A\)</span> 且 <span class="math">\(\Delta_C\ge\tau_C\)</span>，默认 <span class="math">\(\tau_C=0.0\)</span>。</td>
+      <td>放入 buffer，若后面出现 answer-critical step 再一起保留。</td>
+    </tr>
+    <tr>
+      <td><strong>clearly removable</strong></td>
+      <td>两个分数都低。</td>
+      <td>删除。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<figure class="article-figure">
+  <img src="assets/fig08-sgp-cot.png" alt="图 9：SGP-CoT 三阶段框架（截自 SGP-CoT 原论文）">
+  <figcaption>图 9：SGP-CoT 三阶段框架（截自 SGP-CoT 原论文）</figcaption>
+</figure>
+<p><strong>把自裁剪转成偏好学习</strong></p>
+<p>SGP-CoT 的价值在于离线构造更可信的短 reasoning 数据：pruned correct trace 胜过原始长 trace，短正确回答胜过长错误回答，再用 DPO + SFT loss 训练模型偏好“短但仍正确、连贯”的输出。</p>
+<div class="article-table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Preference pair</th>
+      <th>chosen</th>
+      <th>rejected</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Pruning-based pair</strong></td>
+      <td>同一条正确 trace 经自引导剪枝后的短版本</td>
+      <td>原始长但正确的 trace</td>
+    </tr>
+    <tr>
+      <td><strong>Sampling-based pair</strong></td>
+      <td>采样池中更短且正确的回答。</td>
+      <td>更长但错误的回答</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<blockquote>
+<p><strong>外部 pruner 的风险：</strong>SGP-CoT 的关键假设是“冗余是模型相关的”。论文用 PPL probe 和 pruner-student mismatch training 说明，外部 pruner 可能压得更狠，但会破坏学生模型自己的推理支架；外部 pruner 构造 preference data 后，AIME 上最高会掉 8.3 点。</p>
+</blockquote>
+<div class="article-callout">
+<p>💡 <strong>主结果锚点：</strong>论文在多模型、多 benchmark 上报告约 20%-50% CoT token reduction，Pass@1 保持或略升；单 H800 上 1.5B/7B 模型平均 latency 降低超过 40%。</p>
+</div>
+<hr>
+<h3 id="5">5. 总结</h3>
+<p>上述RTE的绝大多数路径都是在结果可验证的 MATH、Coding 等场景，在已知正确的情况下、找到长度最小的、表达最精炼的的 reasoning 策略。</p>
+<p>但是结果难验证的场景下，我们往往需要的是在<strong>部分限制条件下找到最优回复方案</strong>，而非是在正确的方案下、逼近预设条件。</p>
+<p>但是上述论文仍具备很多借鉴意义：</p>
+<ol>
+  <li><p>我们可以通过将上述RTE策略与可验证的合成数据进行结合、泛化到不可验证场景；</p></li>
+  <li><p>尽管部分训练 reward 无法直接复用，我们仍可以参考设计的基本思路复用到当前场景： 1. 避免对短但错误、低质量的回复进行奖励；</p></li>
+  <li><p>使用原生 reasoning_content 及重要性判别策略；</p></li>
+  <li><p>不同任务类型和难度具备不同的上限，模型应具备自适应 RTE 能力；</p></li>
+</ol>
+<hr>
+                    </div>
+
+                    <aside class="article-aside" aria-label="文章侧边栏">
+                        <h2>目录</h2>
+                        <nav class="article-toc" aria-label="文章目录">
+                            <a class="toc-level-3" href="#rte">背景：RTE 要解决什么问题</a>
+                            <a class="toc-level-3" href="#1-reasoning-token">1. reasoning token 存在冗余</a>
+                            <a class="toc-level-4" href="#1-1-thinking-to-recall">1.1 Thinking to Recall：长思考有时是在做参数知识自检索</a>
+                            <a class="toc-level-4" href="#1-2-do-not-think-that-much">1.2 Do NOT Think That Much：长思考也可能只是低效重复</a>
+                            <a class="toc-level-4" href="#1-3-token-complexity">1.3 Token Complexity：用问题粒度理解“刚好够用”</a>
+                            <a class="toc-level-3" href="#2-prompt">2. 无需训练：先用 prompt 和预算估计减少无效长思考</a>
+                            <a class="toc-level-4" href="#2-1-chain-of-draft-cot-cot">2.1 Chain of Draft：无训练地把完整 CoT 改成草稿式 CoT</a>
+                            <a class="toc-level-4" href="#2-2-tale">2.2 TALE：预算不能盲目写小</a>
+                            <a class="toc-level-3" href="#3">3. 需要训练：把预算意识写进模型行为</a>
+                            <a class="toc-level-4" href="#3-1-selfbudgeter">3.1 SelfBudgeter：把预算变成模型先承诺、再遵守的接口</a>
+                            <a class="toc-level-4" href="#3-2-self-training">3.2 Self-Training：从模型自己的输出分布里捞短正确解</a>
+                            <a class="toc-level-4" href="#3-3-training-language-models-to-reason-efficiently-alpha">3.3 Training Language Models to Reason Efficiently：用一个 alpha 把长思考压到可部署区间</a>
+                            <a class="toc-level-4" href="#3-4-l1-leash">3.4 L1 与 LEASH：把长度控制做成训练约束</a>
+                            <a class="toc-level-3" href="#4-reasoning-unit">4. 精修：从压缩长度到剪 reasoning unit</a>
+                            <a class="toc-level-4" href="#4-1-step-entropy">4.1 Step Entropy：低熵步骤可能是可跳过的慢想填充</a>
+                            <a class="toc-level-4" href="#4-2-sgp-cot-likelihood-unit">4.2 SGP-CoT：用模型自己的 likelihood 判断 unit 是否可删</a>
+                            <a class="toc-level-3" href="#5">5. 总结</a>
+                        </nav>
+
+                        <div class="article-info">
+                            <h2>文章信息</h2>
+                            <span>分类：LLM Systems</span>
+                            <span>创建：2026-07-01</span>
+                            <span>更新：2026-07-01</span>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            <span>© 2026. All rights reserved.</span>
+            <span>Built for GitHub Pages.</span>
+        </div>
+    </footer>
+    <script src="../../assets/site.js?v=20260610-1"></script>
+</body>
+</html>
