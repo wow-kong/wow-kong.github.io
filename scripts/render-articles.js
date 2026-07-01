@@ -252,6 +252,7 @@ const isHeading = (line) => /^#{1,6}\s+/.test(line.trim());
 const isBlockquote = (line) => line.trim().startsWith(">");
 const isImage = (line) => /^!\[[^\]]*]\([^)]+\)$/.test(line.trim());
 const isListItem = (line) => /^(\s*)(?:[-*+]|\d+[.)])\s+/.test(line);
+const isColumnsStart = (line) => line.trim() === "::: columns";
 const isTableStart = (lines, index) => {
   const current = lines[index]?.trim() || "";
   const next = lines[index + 1]?.trim() || "";
@@ -432,6 +433,54 @@ const renderList = (lines, startIndex, context) => {
   };
 };
 
+const renderColumns = (lines, startIndex, context) => {
+  const columns = [];
+  let columnLines = [];
+  let index = startIndex + 1;
+
+  while (index < lines.length) {
+    const trimmed = lines[index].trim();
+
+    if (trimmed === ":::") {
+      break;
+    }
+
+    if (trimmed === "::: column") {
+      if (columnLines.length) {
+        columns.push(columnLines);
+      }
+      columnLines = [];
+      index += 1;
+      continue;
+    }
+
+    columnLines.push(lines[index]);
+    index += 1;
+  }
+
+  if (columnLines.length) {
+    columns.push(columnLines);
+  }
+
+  context.hasRenderedContent = true;
+
+  const nonEmptyColumns = columns.filter((column) => column.some((line) => line.trim()));
+  const renderedColumns = nonEmptyColumns
+    .map((column) => {
+      const rendered = renderBlocks(column, {
+        ...context,
+        isNested: true,
+      }).html;
+      return `  <div class="article-column">\n${rendered}\n  </div>`;
+    })
+    .join("\n");
+
+  return {
+    html: `<div class="article-columns" data-column-count="${nonEmptyColumns.length}">\n${renderedColumns}\n</div>`,
+    nextIndex: index < lines.length ? index + 1 : index,
+  };
+};
+
 const isParagraphBoundary = (lines, index) => {
   const line = lines[index];
   if (line === undefined || !line.trim()) {
@@ -446,6 +495,7 @@ const isParagraphBoundary = (lines, index) => {
     isBlockquote(line) ||
     isImage(line) ||
     isListItem(line) ||
+    isColumnsStart(line) ||
     isTableStart(lines, index)
   );
 };
@@ -500,6 +550,13 @@ const renderBlocks = (lines, context) => {
     if (isHeading(line)) {
       html.push(renderHeading(line, context));
       index += 1;
+      continue;
+    }
+
+    if (isColumnsStart(line)) {
+      const renderedColumns = renderColumns(lines, index, context);
+      html.push(renderedColumns.html);
+      index = renderedColumns.nextIndex;
       continue;
     }
 

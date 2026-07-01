@@ -1,5 +1,21 @@
 window.SZF_ARTICLES = [
     {
+        "title": "Reasoning Token Efficiency：从“想得更久”到“想得刚好”",
+        "description": "系统梳理 reasoning token efficiency 的问题定义、无训练压缩、预算感知训练、长度约束 RL，以及 reasoning unit 剪枝路线。",
+        "date": "2026-07-01",
+        "category": "LLM Systems",
+        "readTime": "26 min read",
+        "href": "articles/reasoning-token-efficiency/",
+        "image": "articles/reasoning-token-efficiency/assets/rte-hero-cover.png",
+        "tags": [
+            "Reasoning",
+            "Token Efficiency",
+            "Test-time Compute",
+            "Post-training",
+            "LLM"
+        ]
+    },
+    {
         "title": "DeepSeek-V4 中的 CSA/HCA 注意力机制解读",
         "description": "系统梳理 DeepSeek-V4 中 CSA/HCA 的压缩、检索、滑动窗口与位置编码设计，以及它们在百万 token 上下文下的效率权衡。",
         "date": "2026-05-20",
